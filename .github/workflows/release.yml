@@ -1,0 +1,135 @@
+name: Release
+# Started by hand (Actions tab -> Release -> Run workflow) with a version, e.g.
+# v0.3.0: builds every platform through ci.yml (the Quest APK signed with the
+# release key), then tags the commit and publishes "ZeroSpades X 0.3.0" with
+# every package and their SHA256SUMS. The version must be CMakeLists.txt's
+# ZEROSPADES_VERSION_*: the game and its update checker read that one.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, e.g. v0.3.0"
+        required: true
+
+jobs:
+  check:
+    name: Check the version
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the version must look like v0.3.0, not '$VERSION'"
+            exit 1
+          fi
+          cmake_version="$(for p in MAJOR MINOR PATCH; do
+            sed -n "s/^set(ZEROSPADES_VERSION_$p \([0-9]*\))$/\1/p" CMakeLists.txt
+          done | paste -sd.)"
+          if [ "v$cmake_version" != "$VERSION" ]; then
+            echo "::error::CMakeLists.txt says $cmake_version; set ZEROSPADES_VERSION_* to ${VERSION#v} first"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::$VERSION is already tagged"
+            exit 1
+          fi
+
+  build:
+    name: Build
+    needs: check
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The artifact archives are published as they are: extracting them (as
+      # actions/download-artifact does) drops Unix permissions, and re-zipping
+      # the result ships non-executable binaries that macOS refuses to launch.
+      # The APK is the one file taken out of its archive.
+      - name: Package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p release-assets
+          # The newest artifact of each name, so a re-run job replaces its older upload
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.expired | not) | [.name, .id] | @tsv' \
+            | sort -t$'\t' -k1,1 -k2,2nr | sort -s -u -t$'\t' -k1,1 > artifacts.tsv
+
+          list=""
+          while IFS=$'\t' read -r name id; do
+            platform="${name#ZeroSpadesX-}"
+            if [ "$name" = "ZeroSpadesX-quest3-apk" ]; then
+              gh api "repos/${{ github.repository }}/actions/artifacts/${id}/zip" > apk.zip
+              unzip -p apk.zip ZeroSpadesX-quest3.apk > "release-assets/ZeroSpadesX-${VERSION}-quest3.apk"
+              list+="* **ZeroSpadesX-${VERSION}-quest3.apk**: for Meta Quest 3, standalone (sideload; installs over earlier builds and keeps your settings)."$'\n'
+              continue
+            fi
+            asset="ZeroSpadesX-${VERSION}-${platform}.zip"
+            gh api "repos/${{ github.repository }}/actions/artifacts/${id}/zip" > "release-assets/${asset}"
+
+            # Fail now rather than publish a package whose launcher cannot run
+            case "$platform" in
+              linux-nix) executable="bin/zerospades" ;;
+              linux-x64) executable="zerospades" ;;
+              macos-*) executable="ZeroSpades.app/Contents/MacOS/ZeroSpades" ;;
+              *) executable="" ;;
+            esac
+            if [ -n "$executable" ]; then
+              mode="$(zipinfo "release-assets/${asset}" | awk -v f="$executable" '$NF == f { print $1 }')"
+              if [[ "$mode" != -??x* ]]; then
+                echo "::error::${executable} in ${name} is not executable (mode '${mode}')."
+                exit 1
+              fi
+            fi
+
+            case "$platform" in
+              windows-x64) desc="for 64-bit Windows, with VR (OpenXR)." ;;
+              windows-x86) desc="for 32-bit Windows." ;;
+              linux-x64) desc="for Linux (Ubuntu-based), with VR (OpenXR)." ;;
+              linux-nix) desc="for Linux (built with Nix)." ;;
+              macos-arm64) desc="for Apple Silicon Macs (no VR; shows other players' VR)." ;;
+              macos-intel) desc="for Intel Macs (no VR; shows other players' VR)." ;;
+              *) desc="binary package." ;;
+            esac
+            list+="* **${asset}**: ${desc}"$'\n'
+          done < artifacts.tsv
+
+          for want in windows-x64 windows-x86 macos-arm64 macos-intel linux-x64 linux-nix; do
+            [ -f "release-assets/ZeroSpadesX-${VERSION}-${want}.zip" ] || { echo "::error::no ${want} package"; exit 1; }
+          done
+          [ -s "release-assets/ZeroSpadesX-${VERSION}-quest3.apk" ] || { echo "::error::no Quest APK"; exit 1; }
+
+          (cd release-assets && sha256sum * > SHA256SUMS)
+          printf '## Downloads\n%s\nChecksums are in SHA256SUMS.\n' "$list" > notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --title "ZeroSpades X ${VERSION#v}" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            --notes-file notes.md \
+            release-assets/*
