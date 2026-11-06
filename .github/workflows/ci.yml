@@ -366,7 +366,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y glslang-tools ninja-build zip
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -374,10 +373,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Android build-tools and platform
+      # The NDK pinned, not the runner's newest: NDK 30's libc++ stopped bringing
+      # in <cstdlib>, and OpenAL Soft's bundled fmt no longer built with it.
+      - name: Install Android build-tools, platform and NDK
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" "platforms;android-34"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" "platforms;android-34" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Cache vcpkg and dependencies
         uses: actions/cache@v6
