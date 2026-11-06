@@ -18,6 +18,8 @@
 
  */
 
+#include <chrono>
+#include <functional>
 #include <algorithm>
 #include <cctype>
 
@@ -29,6 +31,7 @@
 #include <Core/Settings.h>
 #include <Core/Strings.h>
 #include <Gui/MainScreenHelper.h>
+#include <Gui/TrainingHost.h>
 #include <Gui/ModsScreenHelper.h>
 #include <Gui/OfficialMods.h>
 #include <Gui/UpdateChecker.h>
@@ -43,6 +46,9 @@
 DEFINE_SPADES_SETTING(cg_protocolVersion, "3");
 DEFINE_SPADES_SETTING(cg_lastQuickConnectHost, "127.0.0.1");
 DEFINE_SPADES_SETTING(cg_serverlistSort, "16385");
+// For tests: start Training the first time the main menu shows, as a headset
+// with no command line has no other way to be put straight into a game.
+DEFINE_SPADES_SETTING(cg_debugStartTraining, "0");
 
 namespace spades {
 	namespace gui {
@@ -618,10 +624,11 @@ namespace spades {
 
 				// Tab strip
 				{
-					Handle<SimpleTabStrip> tabStrip = Handle<SimpleTabStrip>::New(manager);
+					Handle<SimpleTabStrip> tabStripH = Handle<SimpleTabStrip>::New(manager);
+					tabStrip = tabStripH.GetPointerOrNull();
 					tabStrip->SetBounds(AABB2(contentsLeft, tabStripPos, contentsWidth, 24.0F));
-					AddChild(tabStrip.GetPointerOrNull());
-					tabStrip->AddItem(_Tr("MainScreen", "Servers"), serverPanel);
+					AddChild(tabStrip);
+					tabStrip->AddItem(_Tr("MainScreen", "Multiplayer"), serverPanel);
 					tabStrip->AddItem(_Tr("MainScreen", "Demos"), demoPanel);
 					// Hide the Mods tab while trying a single mod (--try-mod):
 					// the mod manager is irrelevant and its enabled set is bypassed.
@@ -630,39 +637,27 @@ namespace spades {
 					tabStrip->changed = [this](UIElement& s) { OnTabChanged(s); };
 				}
 
-				// Coming back from an apply-triggered relaunch — open the Mods tab.
-				if (helper->ShouldOpenModsTab()) {
-					serverPanel->visible = false;
-					demoPanel->visible = false;
-					modsPanel->visible = true;
-				}
 			}
 
-			// Footer buttons (always visible, outside panels)
+			// The tabs' footer: back to the home screen, and the settings.
 			{
 				Handle<Button> button = Handle<Button>::New(manager);
-				button->caption = _Tr("MainScreen", "Quit");
+				button->caption = _Tr("MainScreen", "Back");
 				button->hotKeyText = _Tr("Client", "[Esc]");
 				button->SetBounds(
 				    AABB2(contentsLeft + contentsWidth - 100.0F, footerPos, 100.0F, 30.0F));
-				button->activated = [this](UIElement& s) { OnQuitPressed(s); };
+				button->activated = [this](UIElement&) { ShowHome(); };
 				AddChild(button.GetPointerOrNull());
-			}
-			{
-				Handle<Button> button = Handle<Button>::New(manager);
-				button->caption = _Tr("MainScreen", "Credits");
-				button->SetBounds(
-				    AABB2(contentsLeft + contentsWidth - 202.0F, footerPos, 100.0F, 30.0F));
-				button->activated = [this](UIElement& s) { OnCreditsPressed(s); };
-				AddChild(button.GetPointerOrNull());
+				tabFooter.push_back(button.GetPointerOrNull());
 			}
 			{
 				Handle<Button> button = Handle<Button>::New(manager);
 				button->caption = _Tr("MainScreen", "Setup");
 				button->SetBounds(
-				    AABB2(contentsLeft + contentsWidth - 314.0F, footerPos, 110.0F, 30.0F));
+				    AABB2(contentsLeft + contentsWidth - 212.0F, footerPos, 110.0F, 30.0F));
 				button->activated = [this](UIElement& s) { OnSetupPressed(s); };
 				AddChild(button.GetPointerOrNull());
+				tabFooter.push_back(button.GetPointerOrNull());
 			}
 
 			// Above the title logo: the new release banner, or a small up-to-date
@@ -683,6 +678,52 @@ namespace spades {
 					notice->upToDateCovered = [modsNotice] { return modsNotice->IsShown(); };
 				}
 			}
+			// The home screen: what a game's menu usually is. Training first, since
+			// it is where a new player (and a new VR player above all) should go;
+			// it starts the course straight away (the course is the tutorial).
+			{
+				Handle<TabPanel> homeH = Handle<TabPanel>::New(manager);
+				homePanel = homeH.GetPointerOrNull();
+				homePanel->SetBounds(AABB2(0.0F, 0.0F, sw, sh));
+				AddChild(homePanel);
+
+				struct Entry {
+					std::string caption;
+					std::function<void()> action;
+				};
+				std::vector<Entry> entries;
+				entries.push_back({_Tr("MainScreen", "Training"), [this] { StartTraining(); }});
+				entries.push_back({_Tr("MainScreen", "Multiplayer"), [this] { ShowTab(0); }});
+				entries.push_back({_Tr("MainScreen", "Demos"), [this] { ShowTab(1); }});
+				if (!helper->IsTryingMod())
+					entries.push_back({_Tr("MainScreen", "Mods"), [this] { ShowTab(2); }});
+				entries.push_back(
+				  {_Tr("MainScreen", "Settings"), [this] { OnSetupPressed(*this); }});
+				entries.push_back(
+				  {_Tr("MainScreen", "Credits"), [this] { OnCreditsPressed(*this); }});
+				entries.push_back({_Tr("MainScreen", "Quit"), [this] { OnQuitPressed(*this); }});
+
+				const float bw = std::min(340.0F, sw - 32.0F);
+				const float gap = 8.0F;
+				const float bh = std::max(
+				  30.0F, std::min(42.0F, (sh - tabStripPos - 24.0F) / entries.size() - gap));
+				float y = tabStripPos;
+				for (size_t i = 0; i < entries.size(); i++) {
+					Handle<Button> button = Handle<Button>::New(manager);
+					button->caption = entries[i].caption;
+					button->SetBounds(AABB2((sw - bw) * 0.5F, y, bw, bh));
+					std::function<void()> action = entries[i].action;
+					button->activated = [action](UIElement&) { action(); };
+					homePanel->AddChild(button.GetPointerOrNull());
+					if (i == 0)
+						trainingButton = button.GetPointerOrNull();
+					y += bh + gap;
+				}
+			}
+			ShowHome();
+			// Coming back from an apply-triggered relaunch: open the Mods tab.
+			if (helper->ShouldOpenModsTab())
+				ShowTab(2);
 
 			LoadServerList();
 			LoadDemoList();
@@ -717,6 +758,27 @@ namespace spades {
 			currentDemoListModel = model;
 		}
 
+		void MainScreenMainMenu::ShowHome() {
+			homePanel->visible = true;
+			tabStrip->visible = false;
+			for (UIElement* e : tabFooter)
+				e->visible = false;
+			serverPanel->visible = false;
+			demoPanel->visible = false;
+			modsPanel->visible = false;
+		}
+
+		void MainScreenMainMenu::ShowTab(int index) {
+			homePanel->visible = false;
+			tabStrip->visible = true;
+			for (UIElement* e : tabFooter)
+				e->visible = true;
+			serverPanel->visible = index == 0;
+			demoPanel->visible = index == 1;
+			modsPanel->visible = index == 2;
+			OnTabChanged(*this);
+		}
+
 		void MainScreenMainMenu::OnTabChanged(UIElement&) {
 			// Refresh demo list when switching to demos tab
 			if (demoPanel->visible)
@@ -727,7 +789,11 @@ namespace spades {
 
 		MainScreenMainMenuState MainScreenMainMenu::GetState() {
 			MainScreenMainMenuState state;
-			if (demoPanel->visible)
+			if (homePanel->visible)
+				state.activeTabIndex = -1;
+			else if (serverPanel->visible)
+				state.activeTabIndex = 0;
+			else if (demoPanel->visible)
 				state.activeTabIndex = 1;
 			else if (modsPanel->visible)
 				state.activeTabIndex = 2;
@@ -735,13 +801,12 @@ namespace spades {
 		}
 
 		void MainScreenMainMenu::SetState(const MainScreenMainMenuState& state) {
-			serverPanel->visible = state.activeTabIndex == 0;
-			demoPanel->visible = state.activeTabIndex == 1;
-			modsPanel->visible = state.activeTabIndex == 2;
-
 			// A restored tab is populated by the same path a clicked one is: the
 			// constructor only fills the server list.
-			OnTabChanged(*this);
+			if (state.activeTabIndex < 0)
+				ShowHome();
+			else
+				ShowTab(state.activeTabIndex);
 		}
 
 		void MainScreenMainMenu::LoadModList() {
@@ -800,8 +865,8 @@ namespace spades {
 			const OfficialModsChecker::Result check = OfficialModsChecker::Get().GetResult();
 			modsCheckState = static_cast<int>(check.state);
 			if (modsApplyButton != nullptr) {
-				// Toggles already persist; Apply only restarts to make pending
-				// changes live, so it's actionable only when something changed.
+				// Toggles already persist; Apply makes pending changes live, so
+				// it's actionable only when something changed.
 				modsApplyButton->enable = modsDirty && !modsDownloading;
 			}
 			if (modsDownloading) {
@@ -819,7 +884,7 @@ namespace spades {
 			}
 			if (modsDirty) {
 				modsStatusLabel->text =
-				    _Tr("MainScreen", "Press 'Apply changes' to restart and apply your mods.");
+				    _Tr("MainScreen", "Press 'Apply changes' to apply your mods.");
 				return;
 			}
 			std::string installed = modsHelper->GetInstalledOfficialVersion();
@@ -901,17 +966,38 @@ namespace spades {
 			UpdateModsStatus();
 		}
 
-		// Apply = restart now so the enabled set is mounted. Toggles are already
-		// saved, so this just relaunches straight back into the Mods tab.
+		// Apply = mount the enabled set. Toggles are already saved. The change
+		// takes effect in place when every file it touches can be reloaded, and
+		// otherwise relaunches straight back into the Mods tab.
 		void MainScreenMainMenu::OnApplyModsPressed(UIElement&) {
 			if (modsDownloading)
 				return;
-			helper->RelaunchForMods();
+			std::string error;
+			switch (helper->ApplyMods(error)) {
+				case ModApplyResult::Applied:
+					modsDirty = false;
+					LoadModList();
+					modsStatusLabel->text = _Tr("MainScreen", "Mods applied.");
+					break;
+				case ModApplyResult::NeedsRestart: helper->RelaunchForMods(); break;
+				case ModApplyResult::Refused: {
+					// The previous set is enabled again, so nothing is pending.
+					modsDirty = false;
+					LoadModList();
+					Handle<AlertScreen> al = Handle<AlertScreen>::New(
+					    this,
+					    _Tr("MainScreen", "These mods were not applied: their scripts don't build.") +
+					      "\n\n" + error,
+					    200.0F, true);
+					al->Run();
+					break;
+				}
+			}
 		}
 
 		void MainScreenMainMenu::OnResetModsPressed(UIElement&) {
 			Handle<ConfirmScreen> cs = Handle<ConfirmScreen>::New(
-			    this, _Tr("MainScreen", "Disable all mods? This takes effect after a restart."),
+			    this, _Tr("MainScreen", "Disable all mods? This takes effect on Apply."),
 			    200.0F, true);
 			cs->closed = [this](UIElement& s) { OnResetConfirmed(s); };
 			cs->Run();
@@ -928,7 +1014,7 @@ namespace spades {
 		}
 
 		// Clicking a row toggles the mod in the enabled set. The change is saved
-		// immediately and takes effect the next time the game starts.
+		// immediately and takes effect on Apply.
 		void MainScreenMainMenu::OnModToggle(const std::string& modName) {
 			if (modsDownloading)
 				return;
@@ -1228,21 +1314,84 @@ namespace spades {
 
 		void MainScreenMainMenu::HotKey(const std::string& key) {
 			if (IsEnabled() && key == "Enter") {
-				if (demoPanel->visible) {
+				if (homePanel->visible) {
+					// Nothing is selected on the home screen.
+				} else if (demoPanel->visible) {
 					PlaySelectedDemo();
 				} else {
 					Connect();
 				}
 			} else if (IsEnabled() && key == "Escape") {
-				ui->shouldExit = true;
+				if (homePanel->visible)
+					ui->shouldExit = true;
+				else
+					ShowHome();
 			} else {
 				UIElement::HotKey(key);
+			}
+		}
+
+		void MainScreenMainMenu::StartTraining() {
+			if (trainingStarting)
+				return;
+			std::string msg = TrainingHost::Get().Start();
+			if (!msg.empty()) {
+				Handle<AlertScreen> al = Handle<AlertScreen>::New(this, msg, 200.0F, true);
+				al->Run();
+				return;
+			}
+			trainingStarting = true;
+			trainingStartedAt = std::chrono::duration<double>(
+			                      std::chrono::steady_clock::now().time_since_epoch())
+			                      .count();
+		}
+
+		void MainScreenMainMenu::PollTraining() {
+			if (!trainingStarting)
+				return;
+			TrainingHost& host = TrainingHost::Get();
+			const auto state = host.GetState();
+			const double now = std::chrono::duration<double>(
+			                     std::chrono::steady_clock::now().time_since_epoch())
+			                     .count();
+			if (state == TrainingHost::State::Ready) {
+				trainingStarting = false;
+				std::string msg = helper->ConnectServer(
+				  "127.0.0.1:" + std::to_string(host.GetPort()), 3, "Training");
+				if (!msg.empty()) {
+					host.Stop();
+					Handle<AlertScreen> al = Handle<AlertScreen>::New(this, msg, 200.0F, true);
+					al->Run();
+				}
+			} else if (state == TrainingHost::State::Failed || now - trainingStartedAt > 30.0) {
+				trainingStarting = false;
+				std::string why = host.GetError();
+				host.Stop();
+				if (why.empty())
+					why = _Tr("MainScreen", "The course did not start in time.");
+				Handle<AlertScreen> al = Handle<AlertScreen>::New(
+				  this, _Tr("MainScreen", "Could not start the training course:\n{0}", why),
+				  260.0F, true);
+				al->Run();
 			}
 		}
 
 		void MainScreenMainMenu::Render() {
 			CheckServerList();
 			CheckModsRefresh();
+			static bool debugTrainingStarted = false;
+			if ((int)cg_debugStartTraining && !debugTrainingStarted) {
+				debugTrainingStarted = true;
+				StartTraining();
+			}
+			// Whichever page is up: the course started from the home screen is
+			// waited for and joined from here.
+			PollTraining();
+			if (trainingButton) {
+				trainingButton->caption = trainingStarting
+				                            ? _Tr("MainScreen", "Starting the course...")
+				                            : _Tr("MainScreen", "Training");
+			}
 			UIElement::Render();
 
 			// check for client error message.

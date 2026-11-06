@@ -20,6 +20,7 @@
 
 #include "VulkanFXAAFilter.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanFramebufferManager.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
@@ -72,6 +73,8 @@ namespace spades {
 			}
 
 			if (fxaaPipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, fxaaPipeline, nullptr);
+			if (fxaaPipelineMV != VK_NULL_HANDLE) vkDestroyPipeline(dev, fxaaPipelineMV, nullptr);
+			if (ppRenderPassMV != VK_NULL_HANDLE) vkDestroyRenderPass(dev, ppRenderPassMV, nullptr);
 			if (fxaaLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, fxaaLayout, nullptr);
 			if (singleSamplerDSL != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, singleSamplerDSL, nullptr);
 			if (linearSampler != VK_NULL_HANDLE) vkDestroySampler(dev, linearSampler, nullptr);
@@ -95,6 +98,13 @@ namespace spades {
 			    VK_IMAGE_LAYOUT_UNDEFINED,
 			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			    &dep);
+			if (renderer.IsMultiview())
+				ppRenderPassMV = CreateSimpleColorRenderPass(
+			    dev, colorFormat,
+			    VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			    VK_IMAGE_LAYOUT_UNDEFINED,
+			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			    &dep, 0x3);
 
 			VkSamplerCreateInfo si{};
 			si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -134,6 +144,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -228,6 +239,18 @@ namespace spades {
 			if (vkCreateGraphicsPipelines(dev, cache, 1, &pi, nullptr, &fxaaPipeline) != VK_SUCCESS)
 				SPRaise("Failed to create FXAA pipeline");
 
+			// Multiview: the same pass over both eyes' layers.
+			if (ppRenderPassMV != VK_NULL_HANDLE) {
+				VkShaderModule fsMV = LoadSPIRV("Shaders/Vulkan/PostFilters/FXAA.vk.fs.mv.spv");
+				VkShaderModule fsOld = stages[1].module;
+				stages[1].module = fsMV;
+				pi.renderPass = ppRenderPassMV;
+				if (vkCreateGraphicsPipelines(dev, cache, 1, &pi, nullptr, &fxaaPipelineMV) != VK_SUCCESS)
+					SPRaise("Failed to create the multiview FXAA pipeline");
+				stages[1].module = fsOld;
+				vkDestroyShaderModule(dev, fsMV, nullptr);
+			}
+
 			vkDestroyShaderModule(dev, vs, nullptr);
 			vkDestroyShaderModule(dev, fs, nullptr);
 		}
@@ -246,11 +269,12 @@ namespace spades {
 			}
 		}
 
-		VkFramebuffer VulkanFXAAFilter::MakeFramebuffer(VulkanImage* image, int frameSlot) {
+		VkFramebuffer VulkanFXAAFilter::MakeFramebuffer(VulkanImage* image, int frameSlot,
+		                                                VkRenderPass pass) {
 			VkImageView view = image->GetImageView();
 			VkFramebufferCreateInfo fbInfo{};
 			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-			fbInfo.renderPass = ppRenderPass;
+			fbInfo.renderPass = pass;
 			fbInfo.attachmentCount = 1;
 			fbInfo.pAttachments = &view;
 			fbInfo.width = image->GetWidth();
@@ -304,12 +328,15 @@ namespace spades {
 			uint32_t w = static_cast<uint32_t>(output->GetWidth());
 			uint32_t h = static_cast<uint32_t>(output->GetHeight());
 
-			VkFramebuffer fb = MakeFramebuffer(output, frameSlot);
+			// Both eyes at once when given both layers (multiview).
+			const bool layered = input->GetArrayLayers() > 1 && fxaaPipelineMV != VK_NULL_HANDLE;
+			const VkRenderPass pass = layered ? ppRenderPassMV : ppRenderPass;
+			VkFramebuffer fb = MakeFramebuffer(output, frameSlot, pass);
 			VkDescriptorSet ds = BindTexture(frameSlot, input->GetImageView());
 
 			VkRenderPassBeginInfo rpBegin{};
 			rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-			rpBegin.renderPass = ppRenderPass;
+			rpBegin.renderPass = pass;
 			rpBegin.framebuffer = fb;
 			rpBegin.renderArea.extent = {w, h};
 
@@ -320,7 +347,7 @@ namespace spades {
 			vkCmdSetViewport(cmd, 0, 1, &viewport);
 			vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaaPipeline);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layered ? fxaaPipelineMV : fxaaPipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			                        fxaaLayout, 0, 1, &ds, 0, nullptr);
 

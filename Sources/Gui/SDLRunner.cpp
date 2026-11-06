@@ -36,12 +36,19 @@
 #include <Audio/ALDevice.h>
 #include <Audio/NullDevice.h>
 #include <Client/Client.h>
+#include <Client/VRState.h>
+#include "VRMenuPointer.h"
+#include <Client/Fonts.h>
+#if USE_OPENXR
+#include <VR/OpenXRSystem.h>
+#endif
 #include <Core/ConcurrentDispatch.h>
 #include <Core/Debug.h>
 #include <Core/Disposable.h>
 #include <Core/FileManager.h>
 #include <Core/IStream.h>
 #include <Core/Math.h>
+#include <Core/SamplingProfiler.h>
 #include <Core/Settings.h>
 #include <Draw/SW/SWPort.h>
 #include <Draw/SW/SWRenderer.h>
@@ -52,10 +59,22 @@ SPADES_SETTING(r_videoHeight);
 DEFINE_SPADES_SETTING(r_fullscreen, "0");
 DEFINE_SPADES_SETTING(r_vsync, "1");
 DEFINE_SPADES_SETTING(r_allowSoftwareRendering, "0");
+#if USE_OPENGL
 DEFINE_SPADES_SETTING(r_renderer, "gl");
+#else
+DEFINE_SPADES_SETTING(r_renderer, "vulkan");
+#endif
 DEFINE_SPADES_SETTING(r_vulkan, "0");
 DEFINE_SPADES_SETTING(s_audioDriver, "openal");
 DEFINE_SPADES_SETTING(cl_fps, "0");
+// Play in a headset through OpenXR. Needs the Vulkan renderer; `--vr` sets both.
+DEFINE_SPADES_SETTING(vr_enable, "0");
+// In a headset, ignore the keyboard and mouse altogether: play as a Quest does,
+// so a screen that still needs a key shows up on PC first.
+DEFINE_SPADES_SETTING(vr_controllersOnly, "0");
+// 0: no desktop window in a headset, only the headset (as on a Quest). The
+// window is kept hidden for SDL's events; nothing is drawn to it.
+DEFINE_SPADES_SETTING(vr_mirror, "1");
 
 static int lastMouseX = 0, lastMouseY = 0;
 
@@ -126,6 +145,22 @@ namespace spades {
 		int SDLRunner::GetModState() { return SDL_GetModState(); }
 
 		void SDLRunner::ProcessEvent(SDL_Event& event, View& view) {
+			if ((bool)vr_controllersOnly && client::IsVRFrameActive()) {
+				switch (event.type) {
+					case SDL_MOUSEBUTTONDOWN:
+					case SDL_MOUSEBUTTONUP:
+					case SDL_MOUSEMOTION:
+					case SDL_MOUSEWHEEL:
+					case SDL_KEYDOWN:
+					case SDL_KEYUP:
+					case SDL_TEXTINPUT:
+					case SDL_TEXTEDITING:
+						// The controllers' pointer and keyboard reach the view on
+						// their own (VRMenuPointer), not through SDL.
+						return;
+					default: break;
+				}
+			}
 			switch (event.type) {
 				case SDL_QUIT:
 					view.Closing();
@@ -140,7 +175,8 @@ namespace spades {
 				case SDL_MOUSEMOTION:
 					if (m_active) {
 						if (view.NeedsAbsoluteMouseCoordinate())
-							view.MouseEvent(static_cast<float>(event.motion.x), static_cast<float>(event.motion.y));
+							view.MouseEvent(static_cast<float>(event.motion.x) * mouseScaleX,
+							                static_cast<float>(event.motion.y) * mouseScaleY);
 						else
 							view.MouseEvent(static_cast<float>(event.motion.xrel), static_cast<float>(event.motion.yrel));
 					}
@@ -206,14 +242,36 @@ namespace spades {
 
 				SPLog("Starting Client Loop");
 
+#if USE_OPENXR
+				vr::OpenXRSystem* xr = vr::GetOpenXRSystem();
+#endif
+				VRMenuPointer vrPointer;
+				vrPointer.SetAudio(audio);
+				Handle<client::FontManager> vrFonts; // the keyboard's labels
+
 				while (running) {
 					SDL_Event event;
+					SamplingProfiler::MarkFrame();
 
 					DispatchQueue::GetThreadQueue()->ProcessQueue();
 
+#if USE_OPENXR
+					// xrWaitFrame paces the loop at the headset's rate, so it goes
+					// ahead of the timing below; everything after it predicts for
+					// the moment this frame is shown.
+					if (xr) {
+						xr->PollEvents();
+						if (xr->WantsQuit()) {
+							view->Closing();
+							break;
+						}
+						xr->BeginFrame();
+					}
+#endif
+
 					Uint32 dt = SDL_GetTicks() - ot;
 
-					if ((float)cl_fps != 0) {
+					if ((float)cl_fps != 0 && !client::IsVRFrameActive()) {
 						// Limit the frame rate
 						Uint32 desiredDelay = static_cast<Uint32>(1000.0F / (float)cl_fps);
 						desiredDelay = std::max<Uint32>(std::min<Uint32>(desiredDelay, 200), 1);
@@ -226,18 +284,59 @@ namespace spades {
 					}
 
 					ot += dt;
+
+					// A headset frame must be drawn and ended whatever the tick
+					// count says, or the runtime stalls on the unfinished frame.
+					bool vrFrame = client::IsVRFrameActive();
+					if (vrFrame && (int32_t)dt <= 0)
+						dt = 1;
+
 					if ((int32_t)dt > 0) {
+						if (vrFrame) {
+							// Menus take the controller as their mouse.
+							vrPointer.Update(*view, client::GetVRSystem()->GetFrameState(),
+							                 renderer->ScreenWidth(), renderer->ScreenHeight(),
+							                 (float)dt / 1000.0F);
+						}
+
+						SamplingProfiler::MarkStage(1);
 						view->RunFrame((float)dt / 1000.0F);
+
+						// The keyboard, when the view takes typing.
+						if (vrFrame) {
+							if (!vrFonts)
+								vrFonts = Handle<client::FontManager>::New(renderer);
+							vrPointer.DrawKeyboard(*renderer, vrFonts->GetMediumFont());
+						}
+
+						// Not every screen draws a cursor of its own; in a headset the
+						// pointer is the only way to see where the controller points.
+						if (vrFrame && vrPointer.IsOnPanel()) {
+							Vector2 at = vrPointer.GetPosition();
+							renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, 0.6F));
+							renderer->DrawImage(nullptr, AABB2(at.x - 6.0F, at.y - 6.0F, 12.0F, 12.0F));
+							renderer->SetColorAlphaPremultiplied(MakeVector4(1, 1, 1, 1));
+							renderer->DrawImage(nullptr, AABB2(at.x - 3.0F, at.y - 3.0F, 6.0F, 6.0F));
+						}
 
 						// Views draw; the runner is the only thing that presents. Present
 						// before `RunFrameLate`, which is where post-frame work happens
 						// (closing a subview, restoring renderer state) — that work must
 						// never run between drawing the frame and swapping it.
+						SamplingProfiler::MarkStage(2);
 						renderer->FrameDone();
 						renderer->Flip();
 
+						SamplingProfiler::MarkStage(3);
 						view->RunFrameLate((float)dt / 1000.0F);
 					}
+
+#if USE_OPENXR
+					// Flip ends the headset frame; this only catches a frame no
+					// renderer picked up, so the runtime is never left waiting.
+					if (xr)
+						xr->EndFrame(false, false);
+#endif
 
 					if (view->WantsToBeClosed()) {
 						view->Closing();
@@ -245,7 +344,9 @@ namespace spades {
 						break;
 					}
 
-					int modState = GetModState();
+					int modState = ((bool)vr_controllersOnly && client::IsVRFrameActive())
+					                 ? 0
+					                 : GetModState();
 					if (modState & KMOD_CTRL) {
 						if (!lastCtrl) {
 							view->KeyEvent("Control", true);
@@ -295,6 +396,12 @@ namespace spades {
 					}
 
 					bool ed = view->AcceptsTextInput();
+#if defined(__ANDROID__)
+					// A standalone headset types on the VR keyboard
+					// (VRMenuPointer); SDL's text input would bring up Android's
+					// own keyboard over the game instead.
+					ed = false;
+#endif
 					if (ed && !editing)
 						SDL_StartTextInput();
 					else if (!ed && editing)
@@ -333,6 +440,20 @@ namespace spades {
 						absoluteMouseCoord = ab;
 					}
 
+#if USE_OPENXR
+					// With a headset the 2D layer is laid out at its own size (see
+					// VulkanRenderer::SetupVRUILayout), so the mouse on the window is
+					// scaled onto it.
+					if (vr::GetOpenXRSystem()) {
+						int ww = 0, wh = 0;
+						SDL_GetWindowSize(wnd, &ww, &wh);
+						if (ww > 0 && wh > 0) {
+							mouseScaleX = renderer->ScreenWidth() / static_cast<float>(ww);
+							mouseScaleY = renderer->ScreenHeight() / static_cast<float>(wh);
+						}
+					}
+#endif
+
 					// Process events
 					while (SDL_PollEvent(&event))
 						ProcessEvent(event, *view);
@@ -347,8 +468,19 @@ namespace spades {
 			if ((bool)r_vulkan)
 				return RendererType::Vulkan;
 #endif
+#if USE_VULKAN && USE_OPENXR
+			// VR draws with Vulkan whatever else was picked.
+			if ((bool)vr_enable)
+				return RendererType::Vulkan;
+#endif
 			if (EqualsIgnoringCase(r_renderer, "gl"))
+#ifdef USE_OPENGL
 				return RendererType::GL;
+#elif defined(USE_VULKAN)
+				return RendererType::Vulkan; // a config from a build that had it
+#else
+				return RendererType::SW;
+#endif
 			else if (EqualsIgnoringCase(r_renderer, "vulkan"))
 				return RendererType::Vulkan;
 			else if (EqualsIgnoringCase(r_renderer, "sw"))
@@ -459,7 +591,30 @@ namespace spades {
 #endif
 #ifdef USE_VULKAN
 				case RendererType::Vulkan: {
-					auto vulkanDevice = Handle<SDLVulkanDevice>::New(wnd);
+#if USE_OPENXR
+					const bool headless = vr::GetOpenXRSystem() != nullptr && !(bool)vr_mirror;
+#else
+					const bool headless = false;
+#endif
+					auto vulkanDevice = Handle<SDLVulkanDevice>::New(wnd, headless);
+#if USE_OPENXR
+					// The device was made through the runtime; the session binds the
+					// headset to it. Without a session the game simply runs flat.
+					if (vr::OpenXRSystem* xr = vr::GetOpenXRSystem()) {
+						if (!xr->CreateSession(vulkanDevice->GetInstance(),
+						                       vulkanDevice->GetPhysicalDevice(),
+						                       vulkanDevice->GetDevice(),
+						                       vulkanDevice->GetGraphicsQueueFamily(), 0)) {
+							xr->DestroySession();
+							// With no window there is no monitor to fall back to.
+							if (headless)
+								SPRaise("Could not start a headset session, and vr_mirror is 0 "
+								        "so there is no window to play in. Set vr_mirror 1.");
+							SPLog("[VR] Could not start a headset session; playing on the "
+							      "monitor only");
+						}
+					}
+#endif
 					auto dummy = Handle<Disposable>::New(); // FIXME
 					return std::make_tuple(
 					  Handle<draw::VulkanRenderer>::New(std::move(vulkanDevice)).Cast<client::IRenderer>(),
@@ -480,6 +635,9 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 
 			SDL_Init(SDL_INIT_VIDEO);
+#if defined(__ANDROID__)
+			SDL_StopTextInput(); // see the text input below: no Android keyboard
+#endif
 
 			try {
 				std::string caption;
@@ -497,6 +655,27 @@ namespace spades {
 
 				auto rtype = GetRendererType();
 
+#if USE_OPENXR
+				// The runtime has to exist before the first Vulkan object: it picks
+				// the GPU and adds the extensions the headset needs.
+				std::unique_ptr<vr::OpenXRSystem> xrSystem;
+				if (vr_enable) {
+					if (rtype != RendererType::Vulkan) {
+						SPLog("[VR] vr_enable needs the Vulkan renderer (r_renderer vulkan); "
+						      "playing on the monitor only");
+					} else {
+						xrSystem.reset(vr::OpenXRSystem::TryCreate());
+						if (xrSystem)
+							vr::SetOpenXRSystem(xrSystem.get());
+						else
+							SPLog("[VR] No headset; playing on the monitor only");
+					}
+				}
+#else
+				if (vr_enable)
+					SPLog("[VR] This build has no OpenXR support; playing on the monitor only");
+#endif
+
 				Uint32 sdlFlags = 0;
 				switch (rtype) {
 					case RendererType::GL:
@@ -512,6 +691,12 @@ namespace spades {
 						break;
 					case RendererType::SW: sdlFlags = 0; break;
 				}
+
+#if USE_OPENXR
+				// The window still carries SDL's events; it is just never shown.
+				if (vr::GetOpenXRSystem() && !(bool)vr_mirror && rtype == RendererType::Vulkan)
+					sdlFlags |= SDL_WINDOW_HIDDEN;
+#endif
 
 				if (!m_hasSystemMenu) {
 					if (r_fullscreen)
@@ -578,6 +763,12 @@ namespace spades {
 
 					RunClientLoop(window, renderer.GetPointerOrNull(), audio.GetPointerOrNull());
 
+#if USE_OPENXR
+					// The session holds the Vulkan device; it has to go first.
+					if (xrSystem)
+						xrSystem->DestroySession();
+#endif
+
 					// `SDL_Window` and its associated resources will be inaccessible
 					// past this point. Some referencing objects might be still alive due to
 					// the indeterministic nature of AngelScript's tracing GC, so we explicitly
@@ -585,10 +776,16 @@ namespace spades {
 					windowReference->Dispose();
 				}
 			} catch (...) {
+#if USE_OPENXR
+				vr::SetOpenXRSystem(nullptr);
+#endif
 				SDL_Quit();
 				throw;
 			}
 
+#if USE_OPENXR
+			vr::SetOpenXRSystem(nullptr);
+#endif
 			SDL_Quit();
 		}
 	} // namespace gui

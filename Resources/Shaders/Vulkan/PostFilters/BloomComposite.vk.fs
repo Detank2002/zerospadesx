@@ -19,14 +19,24 @@
  */
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
+
 
 // Bloom final composite — Vulkan port of GL's LensDust.fs (the real
 // r_bloom composite). Linear framebuffer, so GL's linearize/sqrt round
 // trip is dropped; the dust texture still gets squared to linearize it
 // (it is a plain sRGB-ish JPG).
 
-layout(binding = 0) uniform sampler2D inputTexture;
-layout(binding = 1) uniform sampler2D blurTexture1;
+layout(binding = 0) uniform ZS_EYE_SAMPLER inputTexture;
+layout(binding = 1) uniform ZS_EYE_SAMPLER blurTexture1;
 layout(binding = 2) uniform sampler2D dustTexture;
 layout(binding = 3) uniform sampler2D noiseTexture;
 
@@ -43,11 +53,11 @@ void main() {
 	vec3 dust1 = texture(dustTexture, vec2(texCoord.x, 1.0 - texCoord.y)).xyz;
 	dust1 *= dust1; // linearize
 
-	vec3 blur1 = texture(blurTexture1, texCoord).xyz;
+	vec3 blur1 = ZS_EYE_TEX(blurTexture1, texCoord).xyz;
 
 	vec3 sum = dust1 * blur1;
 
-	vec3 final = texture(inputTexture, texCoord).xyz;
+	vec3 final = ZS_EYE_TEX(inputTexture, texCoord).xyz;
 
 	final *= 0.95;
 	final += sum * 2.0;

@@ -66,15 +66,26 @@ namespace spades {
 				// The multisampled aspect's sampled view
 				VkImageView sourceView;
 				bool stencil;
+				// Both eyes' layers at once (multiview): the source and the output
+				// have two layers, resolved through the multiview twins below
+				bool layered;
 				VkFramebuffer framebuffer;
 				VkDescriptorSet set;
 				// Whether it holds the depth as it is now: set by a resolve, cleared
 				// by `Invalidate`
 				bool resolved;
 			};
-			static constexpr std::uint32_t kMaxTargets = 4;
+			// The scene's depth and stencil and the mirror's depth, and in a headset the
+			// scope view's, whose targets are its own (VulkanRendererVR.cpp)
+			static constexpr std::uint32_t kMaxTargets = 8;
 			std::vector<Target> targets;
 			VkDescriptorPool descPool;
+
+			// Multiview: both eyes' layers in one pass, made only in multiview.
+			VkRenderPass ppRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline resolvePipelineMV = VK_NULL_HANDLE;
+			VkRenderPass stencilRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline stencilResolvePipelineMV = VK_NULL_HANDLE;
 
 			void InitRenderPass();
 			void InitDescriptorSetLayout();
@@ -83,7 +94,8 @@ namespace spades {
 
 			VkShaderModule LoadSPIRV(const char* path);
 			VkPipeline CreateResolvePipeline(const char* fragmentShader, VkRenderPass renderPass);
-			Target& GetTarget(VkImageView sourceView, bool stencil, VulkanImage* output);
+			Target& GetTarget(VkImageView sourceView, bool stencil, bool layered, VulkanImage* output);
+			VkRenderPass RenderPassFor(bool stencil, bool layered) const;
 			void Draw(VkCommandBuffer cmd, Target& target);
 
 			void CreatePipeline() override {}

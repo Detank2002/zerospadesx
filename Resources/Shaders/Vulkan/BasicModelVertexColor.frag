@@ -47,6 +47,25 @@ layout(location = 0) out vec4 fragColor;
 #include "SceneAmbientOcclusion.glsl"
 #include "SceneLight/ModelShadow.glsl"
 
+// In a headset (vr_brightness), the brightest surfaces roll off toward this
+// peak instead of clipping at full white: white blocks filling the view, as on
+// a snow map, tired testers' eyes. 0: off (a monitor). Before the fog, so the
+// far map still fades into the sky. See VulkanRenderer::GetVRVoxelPeak.
+layout(constant_id = 1) const float VOXEL_PEAK = 0.0;
+vec3 VoxelRollOff(vec3 c) {
+	if (VOXEL_PEAK <= 0.0)
+		return c;
+	// Below the knee nothing changes; above it the brightest channel eases
+	// toward the peak with the same slope at the knee, and the others keep
+	// their ratio to it, so a colour keeps its hue.
+	float knee = VOXEL_PEAK * 0.55;
+	float m = max(max(c.r, c.g), c.b);
+	if (m <= knee)
+		return c;
+	float span = VOXEL_PEAK - knee;
+	return c * ((knee + span * (1.0 - exp((knee - m) / span))) / m);
+}
+
 void main() {
 	// Reflection pass: discard fragments below the water plane so underwater
 	// players never enter the mirror (waterClip is +inf-based in the scene pass).
@@ -81,6 +100,8 @@ void main() {
 
 	fragColor = vec4(vertexColor * diffuse, 1.0);
 	fragColor.xyz += vertexColor * EvaluateDynamicLights(worldPosition, nrm);
+
+	fragColor.xyz = VoxelRollOff(fragColor.xyz);
 
 	// Apply fog fading
 	fragColor.xyz = mix(fragColor.xyz, inFogColor, fogDensity);

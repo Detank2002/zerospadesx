@@ -95,6 +95,7 @@ namespace spades {
 				VkPipelineLayout shadowMapPipelineLayout = VK_NULL_HANDLE;
 				VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 				bool physicalLighting = false;
+				float voxelPeak = 0.0F; // VulkanRenderer::GetVRVoxelPeak when made
 
 				/** Destroys every pipeline, layout and set layout it holds */
 				void Destroy(VkDevice device);
@@ -156,6 +157,12 @@ namespace spades {
 
 		public:
 			VulkanOptimizedVoxelModel(VoxelModel*, VulkanRenderer& r);
+
+			/**
+			 * Takes the geometry of `other`, which gets this model's old one. The GPU
+			 * must be idle: the old buffers are freed with `other`.
+			 */
+			void Replace(VulkanOptimizedVoxelModel& other);
 
 			static void PreloadShaders(VulkanRenderer&);
 			/**

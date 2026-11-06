@@ -67,10 +67,12 @@ namespace spades {
 
 			struct GlyphImage {
 				client::IImage &img;
-				AABB2 const bounds;
-				Vector2 const offset;
-				GlyphImage(client::IImage &img, const AABB2 &bounds, const Vector2 &offset)
-					: img(img), bounds(bounds), offset(offset) {}
+				AABB2 const bounds; // texels
+				Vector2 const offset; // layout pixels
+				float const density;  // texels per layout pixel
+				GlyphImage(client::IImage &img, const AABB2 &bounds, const Vector2 &offset,
+						   float density = 1.0F)
+					: img(img), bounds(bounds), offset(offset), density(density) {}
 			};
 
 			struct Glyph {
@@ -97,6 +99,10 @@ namespace spades {
 			float baselineY;
 
 			bool rendererIsLowQuality;
+			/** Glyphs are rasterised at this many texels per layout pixel: the
+			 * renderer's UI pixel ratio, rounded. Metrics stay in layout pixels, so
+			 * text measures and lays out the same at any ratio. */
+			int rasterScale;
 
 			std::shared_ptr<FTFontSet> fontSet;
 
@@ -110,6 +116,8 @@ namespace spades {
 									 T2 lineBreakHandler);
 
 			void RenderGlyph(Glyph &);
+			void DrawGlyphImage(const GlyphImage &, const Vector2 &offset, const Vector2 &pen,
+								float scale);
 			void RenderBlurGlyph(Glyph &);
 			void RenderOutlineGlyph(Glyph &);
 

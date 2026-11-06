@@ -49,13 +49,28 @@
 // model drawn without `drawOutline` or a ghost, which GL draws no outline for.
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#define ZS_EYE_USAMPLER usampler2DArray
+#define ZS_EYE_SIZE(t) textureSize(t, 0).xy
+#define ZS_EYE_FETCH(t, p) texelFetch(t, ivec3((p), gl_ViewIndex), 0)
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#define ZS_EYE_USAMPLER usampler2D
+#define ZS_EYE_SIZE(t) textureSize(t, 0)
+#define ZS_EYE_FETCH(t, p) texelFetch(t, (p), 0)
+#endif
 
 layout(location = 0) in vec2 texCoord;
 layout(location = 0) out vec4 fragColor;
 
-layout(set = 0, binding = 0) uniform sampler2D colorTexture;
-layout(set = 0, binding = 1) uniform sampler2D depthTexture;
-layout(set = 0, binding = 2) uniform usampler2D stencilTexture;
+layout(set = 0, binding = 0) uniform ZS_EYE_SAMPLER colorTexture;
+layout(set = 0, binding = 1) uniform ZS_EYE_SAMPLER depthTexture;
+layout(set = 0, binding = 2) uniform ZS_EYE_USAMPLER stencilTexture;
 
 // kStencilBitNoOutline in VulkanSceneStencil.h
 const uint kStencilBitNoOutline = 2u;
@@ -74,18 +89,18 @@ float linearise(float z) {
 }
 
 void main() {
-    vec3 inputColor = texture(colorTexture, texCoord).rgb;
+    vec3 inputColor = ZS_EYE_TEX(colorTexture, texCoord).rgb;
 
     vec2 invRes = pc.invViewport.xy;
     float fogDistance = pc.zNearFarFogStrength.z;
     float strength = pc.zNearFarFogStrength.w;
     float threshold = pc.thresholds.x;
 
-    float zC = linearise(texture(depthTexture, texCoord).r);
-    float zR = linearise(texture(depthTexture, texCoord + vec2(invRes.x, 0.0)).r);
-    float zL = linearise(texture(depthTexture, texCoord - vec2(invRes.x, 0.0)).r);
-    float zU = linearise(texture(depthTexture, texCoord + vec2(0.0, invRes.y)).r);
-    float zD = linearise(texture(depthTexture, texCoord - vec2(0.0, invRes.y)).r);
+    float zC = linearise(ZS_EYE_TEX(depthTexture, texCoord).r);
+    float zR = linearise(ZS_EYE_TEX(depthTexture, texCoord + vec2(invRes.x, 0.0)).r);
+    float zL = linearise(ZS_EYE_TEX(depthTexture, texCoord - vec2(invRes.x, 0.0)).r);
+    float zU = linearise(ZS_EYE_TEX(depthTexture, texCoord + vec2(0.0, invRes.y)).r);
+    float zD = linearise(ZS_EYE_TEX(depthTexture, texCoord - vec2(0.0, invRes.y)).r);
 
     float laplacian = abs(4.0 * zC - zR - zL - zU - zD);
 
@@ -105,11 +120,11 @@ void main() {
     float ratio = laplacian / max(zNearest, 0.01);
 
     // The stencil texel under the nearest tap, the taps being a texel apart
-    ivec2 stencilSize = textureSize(stencilTexture, 0);
+    ivec2 stencilSize = ZS_EYE_SIZE(stencilTexture);
     ivec2 nearestTexel = clamp(ivec2(texCoord * vec2(stencilSize)) + nearestOffset,
                                ivec2(0), stencilSize - 1);
     bool outlined =
-        (texelFetch(stencilTexture, nearestTexel, 0).r & kStencilBitNoOutline) == 0u;
+        (ZS_EYE_FETCH(stencilTexture, nearestTexel).r & kStencilBitNoOutline) == 0u;
 
     float edge = outlined ? smoothstep(threshold, threshold * 4.0, ratio) : 0.0;
 

@@ -18,6 +18,7 @@
 
  */
 
+#include <algorithm>
 #include <cmath>
 #include <ft2build.h>
 
@@ -67,6 +68,35 @@ namespace spades {
 			operator FT_Bitmap*() { return &b; }
 			FT_Bitmap* operator->() { return &b; }
 		};
+
+		namespace {
+			/** A glyph bitmap shrunk by `factor`, each output pixel the average
+			 * of a factor x factor block (alpha only; the colour is white). */
+			Handle<Bitmap> ShrinkGlyphBitmap(Bitmap& in, int factor) {
+				int const inW = in.GetWidth(), inH = in.GetHeight();
+				int const w = (inW + factor - 1) / factor, h = (inH + factor - 1) / factor;
+				auto out = Handle<Bitmap>::New(w, h);
+				for (int y = 0; y < h; ++y) {
+					for (int x = 0; x < w; ++x) {
+						uint32_t sum = 0;
+						for (int ky = 0; ky < factor; ++ky) {
+							int iy = y * factor + ky;
+							if (iy >= inH)
+								break;
+							for (int kx = 0; kx < factor; ++kx) {
+								int ix = x * factor + kx;
+								if (ix >= inW)
+									break;
+								sum += in.GetPixels()[iy * inW + ix] >> 24;
+							}
+						}
+						uint32_t a = sum / static_cast<uint32_t>(factor * factor);
+						out->GetPixels()[y * w + x] = (a << 24) | 0xFFFFFF;
+					}
+				}
+				return out;
+			}
+		} // namespace
 
 		FTFontSet::FTFontSet() { SPADES_MARK_FUNCTION(); }
 		FTFontSet::~FTFontSet() { SPADES_MARK_FUNCTION(); }
@@ -203,13 +233,19 @@ namespace spades {
 			SPAssert(renderer);
 			SPAssert(fontSet);
 
+			rendererIsLowQuality = dynamic_cast<draw::SWRenderer*>(renderer);
+			rasterScale = rendererIsLowQuality
+			                ? 1
+			                : std::max(1, std::min(4, static_cast<int>(std::lround(
+			                                            renderer->GetUIPixelRatio()))));
+
 			binSize = 256;
-			int targetSize = static_cast<int>(std::min(height * 4.0F, 4000.0F));
+			int targetSize =
+			  static_cast<int>(std::min(height * 4.0F * static_cast<float>(rasterScale), 4000.0F));
 			while (binSize < targetSize)
 				binSize <<= 1;
 
 			baselineY = std::floor(height * 1.0F);
-			rendererIsLowQuality = dynamic_cast<draw::SWRenderer*>(renderer);
 
 			bins.emplace_back(binSize, binSize, *renderer);
 		}
@@ -304,7 +340,11 @@ namespace spades {
 			if (g.image)
 				return;
 
-			FT_Set_Char_Size(g.face, 0, static_cast<FT_F26Dot6>(height * 64.0F), 72, 72);
+			// At rasterScale times the size; the advance (from GetGlyph) stays the
+			// layout one, since there is no hinting to make the two disagree.
+			FT_Set_Char_Size(g.face, 0,
+			                 static_cast<FT_F26Dot6>(height * static_cast<float>(rasterScale) * 64.0F),
+			                 72, 72);
 			FT_Load_Glyph(g.face, g.charIndex, FT_LOAD_NO_HINTING);
 			FT_Render_Glyph(g.face->glyph, FT_RENDER_MODE_NORMAL);
 
@@ -348,12 +388,13 @@ namespace spades {
 				(float)spH - 1
 			);
 
+			const float rs = static_cast<float>(rasterScale);
 			Vector2 offs(
-				(float)g.face->glyph->bitmap_left,
-				baselineY - g.face->glyph->bitmap_top
+				(float)g.face->glyph->bitmap_left / rs,
+				(baselineY * rs - g.face->glyph->bitmap_top) / rs
 			);
 
-			g.image.reset((*result).image, bounds, offs);
+			g.image.reset((*result).image, bounds, offs, rs);
 			g.bmp = spbmp;
 		}
 
@@ -364,7 +405,13 @@ namespace spades {
 
 			enum { KernelSize = 6 };
 
-			auto& orig = *g.bmp;
+			// A blurred shadow gains nothing from resolution, and its kernel is in
+			// pixels: made from the glyph at layout size, it looks the same at
+			// any rasterScale.
+			Handle<Bitmap> source = g.bmp;
+			if (rasterScale > 1)
+				source = ShrinkGlyphBitmap(*g.bmp, rasterScale);
+			auto& orig = *source;
 			int const origW = orig.GetWidth();
 			int const origH = orig.GetHeight();
 
@@ -452,7 +499,8 @@ namespace spades {
 			if (g.outlineImage)
 				return;
 
-			enum { Thickness = 1 };
+			// One layout pixel thick at any rasterScale.
+			int const Thickness = rasterScale;
 
 			auto &orig = *g.bmp;
 			int const origW = orig.GetWidth();
@@ -502,9 +550,29 @@ namespace spades {
 				(float)newH - 1
 			);
 
-			Vector2 offs = (*g.image).offset - Vector2(1, 1) * (float)Thickness;
+			Vector2 offs = (*g.image).offset - Vector2(1, 1);
 
-			g.outlineImage.reset((*result).image, bounds, offs);
+			g.outlineImage.reset((*result).image, bounds, offs, static_cast<float>(rasterScale));
+		}
+
+		void FTFont::DrawGlyphImage(const GlyphImage& img, const Vector2& offset,
+		                            const Vector2& pen, float scale) {
+			// `img` holds `density` texels per layout pixel; it lands on the
+			// renderer's own pixel grid, rasterScale pixels per layout pixel.
+			const float d = img.density;
+			const float grid = static_cast<float>(rasterScale);
+			auto srcBounds = img.bounds;
+			auto target = offset + (pen + img.offset) * scale;
+			target = (target * grid + 0.5F).Floor() * (1.0F / grid); // for sharper rendering
+			AABB2 destBounds(target.x, target.y, srcBounds.GetWidth() * scale / d,
+			                 srcBounds.GetHeight() * scale / d);
+
+			if (!rendererIsLowQuality) {
+				srcBounds = srcBounds.Inflate(0.5F);
+				destBounds = destBounds.Inflate(0.5F * scale / d);
+			}
+
+			renderer->DrawImage(&img.img, destBounds, srcBounds);
 		}
 
 		void FTFont::Draw(const std::string& str, Vector2 offset, float scale, Vector4 color) {
@@ -521,20 +589,7 @@ namespace spades {
 			  str,
 			  [&](Glyph& g) {
 				  RenderGlyph(g);
-
-				  auto& img = *g.image;
-				  auto srcBounds = img.bounds;
-				  auto target = offset + (Vector2(x, y) + img.offset) * scale;
-				  target = (target + 0.5F).Floor(); // for sharper rendering
-				  AABB2 destBounds(target.x, target.y, srcBounds.GetWidth() * scale,
-								   srcBounds.GetHeight() * scale);
-
-				  if (!rendererIsLowQuality) {
-					  srcBounds = srcBounds.Inflate(0.5F);
-					  destBounds = destBounds.Inflate(0.5F * scale);
-				  }
-
-				  renderer->DrawImage(&img.img, destBounds, srcBounds);
+				  DrawGlyphImage(*g.image, offset, Vector2(x, y), scale);
 
 				  x += (int)roundf(g.advance.x);
 				  y += (int)roundf(g.advance.y);
@@ -562,20 +617,7 @@ namespace spades {
 			  str,
 			  [&](Glyph& g) {
 				  RenderBlurGlyph(g);
-
-				  auto& img = *g.blurImage;
-				  auto srcBounds = img.bounds;
-				  auto target = offset + (Vector2(x, y) + img.offset) * scale;
-				  target = (target + 0.5F).Floor(); // for sharper rendering
-				  AABB2 destBounds(target.x, target.y, srcBounds.GetWidth() * scale,
-								   srcBounds.GetHeight() * scale);
-
-				  if (!rendererIsLowQuality) {
-					  srcBounds = srcBounds.Inflate(0.5F);
-					  destBounds = destBounds.Inflate(0.5F * scale);
-				  }
-
-				  renderer->DrawImage(&img.img, destBounds, srcBounds);
+				  DrawGlyphImage(*g.blurImage, offset, Vector2(x, y), scale);
 
 				  x += (int)roundf(g.advance.x);
 				  y += (int)roundf(g.advance.y);
@@ -603,21 +645,7 @@ namespace spades {
 				str,
 				[&](Glyph &g) {
 					RenderOutlineGlyph(g);
-
-					auto &img = *g.outlineImage;
-					auto srcBounds = img.bounds;
-					auto target = offset + (Vector2(x, y) + img.offset) * scale;
-					target = (target + 0.5F).Floor();
-					AABB2 destBounds(target.x, target.y,
-									 srcBounds.GetWidth() * scale,
-									 srcBounds.GetHeight() * scale);
-
-					if (!rendererIsLowQuality) {
-						srcBounds = srcBounds.Inflate(0.5F);
-						destBounds = destBounds.Inflate(0.5F * scale);
-					}
-
-					renderer->DrawImage(&img.img, destBounds, srcBounds);
+					DrawGlyphImage(*g.outlineImage, offset, Vector2(x, y), scale);
 
 					x += (int)roundf(g.advance.x);
 					y += (int)roundf(g.advance.y);

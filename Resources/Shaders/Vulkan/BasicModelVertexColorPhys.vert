@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the scene view's set
+#define ZS_VIEWS_BINDING 2
+#include "Multiview.glsl"
+
 #include "SceneView.glsl"
 
 // What changes from draw to draw: the model's placement and colours. The rest is
@@ -119,4 +123,5 @@ void main() {
 	// mirrorClipZ is +inf in the normal scene pass, so this stays positive.
 	waterClip = sceneView.fogColorMirrorClipZ.w - worldPos.z;
 	worldPosition = worldPos;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

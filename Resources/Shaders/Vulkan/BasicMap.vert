@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the scene view's set
+#define ZS_VIEWS_BINDING 2
+#include "Multiview.glsl"
+
 #include "SceneView.glsl"
 
 // What changes from draw to draw: the chunk's origin. The rest is the pass's
@@ -160,4 +164,5 @@ void main() {
 	modelShadowCoord2 = (shadowSampling.cascadeMatrix[2] * worldPos).xyz;
 	shadowViewDepth = gl_Position.w;
 	worldPosition = worldPos.xyz;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

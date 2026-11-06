@@ -93,6 +93,10 @@ namespace spades {
 			~VulkanProgram();
 
 		public:
+
+			/** Multiview: a set every program's layout appends after its own (set 1),
+			 * the renderer's per-eye set. VK_NULL_HANDLE: none. */
+			static void SetExtraSetLayout(VkDescriptorSetLayout layout);
 			VulkanProgram(Handle<gui::SDLVulkanDevice> device, const std::string& name = "(unnamed)");
 
 			void AttachShader(Handle<VulkanShader> shader);

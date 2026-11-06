@@ -29,6 +29,9 @@
 #include "VulkanImage.h"
 #include "VulkanImageWrapper.h"
 #include "VulkanSceneLights.h"
+#include <Core/VoxelModel.h>
+#include <cmath>
+#include <cstddef>
 #include <Gui/SDLVulkanDevice.h>
 #include <Core/Bitmap.h>
 #include <Core/BitmapAtlasGenerator.h>
@@ -38,11 +41,21 @@
 #include <Core/Settings.h>
 #include <Core/IStream.h>
 #include <array>
+#include <vector>
 #include <cstddef>
 #include <map>
 
 namespace spades {
 	namespace draw {
+		namespace {
+			/** round(sunlight * 255) * 256 + round(daylight * 255): exact in a float,
+			 * so the model shaders' one spare push-constant slot carries both. */
+			float PackSunAndDaylight(VulkanRenderer& r) {
+				auto q = [](float v) { return std::floor(Clamp(v, 0.0F, 1.0F) * 255.0F + 0.5F); };
+				return q(r.GetSunlight()) * 256.0F + q(r.GetDaylight());
+			}
+		} // namespace
+
 		// Initialize static members
 		VulkanOptimizedVoxelModel::PipelineCache VulkanOptimizedVoxelModel::sharedPipeline;
 		int VulkanOptimizedVoxelModel::pipelineRefCount = 0;
@@ -161,6 +174,20 @@ namespace spades {
 			std::vector<uint32_t>().swap(indices);
 		}
 
+		void VulkanOptimizedVoxelModel::Replace(VulkanOptimizedVoxelModel& other) {
+			SPADES_MARK_FUNCTION();
+			std::swap(descriptorPool, other.descriptorPool);
+			std::swap(image, other.image);
+			std::swap(aoImage, other.aoImage);
+			std::swap(vertexBuffer, other.vertexBuffer);
+			std::swap(indexBuffer, other.indexBuffer);
+			std::swap(numIndices, other.numIndices);
+			std::swap(origin, other.origin);
+			std::swap(radius, other.radius);
+			std::swap(dimensions, other.dimensions);
+			std::swap(boundingBox, other.boundingBox);
+		}
+
 		VulkanOptimizedVoxelModel::~VulkanOptimizedVoxelModel() {
 			SPADES_MARK_FUNCTION();
 
@@ -254,6 +281,15 @@ namespace spades {
 				uint8_t g = (color >> 8) & 0xFF;
 				uint8_t b = (color >> 16) & 0xFF;
 
+				// Emissive by GL's rule (GLOptimizedVoxelModel): an Emissive voxel
+				// that is bright in some channel, or black (team-coloured), glows;
+				// the rest of an emissive model is lit like any other.
+				const auto material = static_cast<MaterialType>(color >> 24);
+				const int threshold = 250;
+				const bool emissive = material == MaterialType::Emissive &&
+				                      (r >= threshold || g >= threshold || b >= threshold ||
+				                       (r == 0 && g == 0 && b == 0));
+
 				// Calculate face vertices based on normal direction
 				Vertex v[4];
 				for (int i = 0; i < 4; i++) {
@@ -263,7 +299,7 @@ namespace spades {
 					v[i].colorR = r;
 					v[i].colorG = g;
 					v[i].colorB = b;
-					v[i].padding = 0;
+					v[i].padding = emissive ? 1 : 0; // location 5: the emissive flag
 				}
 
 				// Per-face geometry + AO sample axes (u along v[0]→v[1], v along v[0]→v[3]).
@@ -935,20 +971,29 @@ namespace spades {
 			fragShaderStageInfo.module = fragShaderModule;
 			fragShaderStageInfo.pName = "main";
 
-			// Specialization constant: USE_RADIOSITY (SceneLight/MapLight.glsl), for
+			// Specialization constants: USE_RADIOSITY (SceneLight/MapLight.glsl), for
 			// the physical shader as for the basic one — picks the MapRadiosityNull
-			// ambient when r_radiosity == 0, the radiosity one otherwise. Mirrors the
-			// map renderer.
-			int32_t useRadiosity = (int)renderer.GetSettings().r_radiosity != 0 ? 1 : 0;
-			VkSpecializationMapEntry specEntry{};
-			specEntry.constantID = 0;
-			specEntry.offset = 0;
-			specEntry.size = sizeof(int32_t);
+			// ambient when r_radiosity == 0, the radiosity one otherwise — and
+			// VOXEL_PEAK (vr_brightness, both shaders; remade with the next map,
+			// `InvalidateSharedPipeline`). Mirrors the map renderer.
+			sharedPipeline.voxelPeak = renderer.GetVRVoxelPeak();
+			struct {
+				int32_t useRadiosity;
+				float voxelPeak;
+			} specData{(int)renderer.GetSettings().r_radiosity != 0 ? 1 : 0,
+			           sharedPipeline.voxelPeak};
+			VkSpecializationMapEntry specEntries[2]{};
+			specEntries[0].constantID = 0;
+			specEntries[0].offset = offsetof(decltype(specData), useRadiosity);
+			specEntries[0].size = sizeof(int32_t);
+			specEntries[1].constantID = 1;
+			specEntries[1].offset = offsetof(decltype(specData), voxelPeak);
+			specEntries[1].size = sizeof(float);
 			VkSpecializationInfo specInfo{};
-			specInfo.mapEntryCount = 1;
-			specInfo.pMapEntries = &specEntry;
-			specInfo.dataSize = sizeof(int32_t);
-			specInfo.pData = &useRadiosity;
+			specInfo.mapEntryCount = 2;
+			specInfo.pMapEntries = specEntries;
+			specInfo.dataSize = sizeof(specData);
+			specInfo.pData = &specData;
 			fragShaderStageInfo.pSpecializationInfo = &specInfo;
 
 			VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
@@ -959,7 +1004,7 @@ namespace spades {
 			bindingDescription.stride = sizeof(Vertex);
 			bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-			std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
+			std::array<VkVertexInputAttributeDescription, 6> attributeDescriptions{};
 
 			// Position (location 0)
 			attributeDescriptions[0].binding = 0;
@@ -992,6 +1037,12 @@ namespace spades {
 			attributeDescriptions[4].location = 4;
 			attributeDescriptions[4].format = VK_FORMAT_R8_UINT;
 			attributeDescriptions[4].offset = offsetof(Vertex, aoY);
+
+			// The emissive flag (location 5), in the byte after the normal.
+			attributeDescriptions[5].binding = 0;
+			attributeDescriptions[5].location = 5;
+			attributeDescriptions[5].format = VK_FORMAT_R8_UINT;
+			attributeDescriptions[5].offset = offsetof(Vertex, padding);
 
 			VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1130,15 +1181,15 @@ namespace spades {
 			// layout. Set 2 = the frame's dynamic lights. Set 3 = the pass's view.
 			VulkanShadowMapRenderer* smrLayout = renderer.GetShadowMapRenderer();
 			VulkanSceneLights& lightClusters = renderer.GetSceneLights();
-			VkDescriptorSetLayout modelSetLayouts[4] = {
+			std::vector<VkDescriptorSetLayout> modelSetLayouts{
 			    sharedPipeline.descriptorSetLayout,
 			    smrLayout ? smrLayout->GetSamplingSetLayout() : lightClusters.GetEmptySetLayout(),
 			    lightClusters.GetSetLayout(), renderer.GetSceneViewSetLayout()};
 
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutInfo.setLayoutCount = 4;
-			pipelineLayoutInfo.pSetLayouts = modelSetLayouts;
+			pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(modelSetLayouts.size());
+			pipelineLayoutInfo.pSetLayouts = modelSetLayouts.data();
 			pipelineLayoutInfo.pushConstantRangeCount = 1;
 			pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -1503,13 +1554,13 @@ namespace spades {
 
 						const VkDescriptorSetLayout emptySet =
 						  renderer.GetSceneLights().GetEmptySetLayout();
-						const VkDescriptorSetLayout xrSetLayouts[4] = {
+						std::vector<VkDescriptorSetLayout> xrSetLayouts{
 						  emptySet, emptySet, emptySet, renderer.GetSceneViewSetLayout()};
 
 						VkPipelineLayoutCreateInfo xrLayoutInfo{};
 						xrLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-						xrLayoutInfo.setLayoutCount = 4;
-						xrLayoutInfo.pSetLayouts = xrSetLayouts;
+						xrLayoutInfo.setLayoutCount = static_cast<uint32_t>(xrSetLayouts.size());
+						xrLayoutInfo.pSetLayouts = xrSetLayouts.data();
 						xrLayoutInfo.pushConstantRangeCount = 1;
 						xrLayoutInfo.pPushConstantRanges = &xrPushRange;
 

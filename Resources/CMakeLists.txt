@@ -126,6 +126,30 @@ if(ZEROSPADES_RESOURCES)
 			list(APPEND COMPILED_SPIRV_FILES ${SHADER_SPV})
 		endforeach()
 
+		# Multiview variants (vr_multiview: both eyes in one pass). A shader that
+		# mentions ZS_MULTIVIEW, or sets ZS_VIEWS_SET for Multiview.glsl, is
+		# compiled a second time with ZS_MULTIVIEW defined, to
+		# NAME.mv.spv beside NAME.spv; the renderer loads the variant only in
+		# multiview, so a monitor's shaders are exactly what they were.
+		foreach(SHADER_SRC ${VK_VERT_FILES} ${VK_FRAG_FILES} ${VK_VS_FILES} ${VK_FS_FILES})
+			file(STRINGS ${SHADER_SRC} ZS_MV_MARK REGEX "ZS_MULTIVIEW|ZS_VIEWS_SET" LIMIT_COUNT 1)
+			if(ZS_MV_MARK)
+				set(ZS_MV_STAGE "")
+				if(SHADER_SRC MATCHES "\\.vk\\.vs$")
+					set(ZS_MV_STAGE -S vert)
+				elseif(SHADER_SRC MATCHES "\\.vk\\.fs$")
+					set(ZS_MV_STAGE -S frag)
+				endif()
+				set(SHADER_MV_SPV "${SHADER_SRC}.mv.spv")
+				add_custom_command(
+					OUTPUT ${SHADER_MV_SPV}
+					COMMAND ${GLSLANG_VALIDATOR} -V ${ZS_MV_STAGE} -DZS_MULTIVIEW=1 -o ${SHADER_MV_SPV} ${SHADER_SRC}
+					DEPENDS ${SHADER_SRC} ${VK_INCLUDE_FILES}
+					COMMENT "Compiling Vulkan shader (multiview): ${SHADER_SRC}")
+				list(APPEND COMPILED_SPIRV_FILES ${SHADER_MV_SPV})
+			endif()
+		endforeach()
+
 		add_custom_target(compile_vulkan_shaders ALL
 			DEPENDS ${COMPILED_SPIRV_FILES}
 			COMMENT "Compiling Vulkan shaders to SPIR-V")

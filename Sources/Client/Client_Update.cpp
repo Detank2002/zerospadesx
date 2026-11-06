@@ -50,6 +50,7 @@
 #include "World.h"
 
 #include "NetClient.h"
+#include <Gui/TrainingHost.h>
 
 DEFINE_SPADES_SETTING(cg_ragdoll, "1");
 SPADES_SETTING(cg_blood);
@@ -61,6 +62,8 @@ DEFINE_SPADES_SETTING(cg_respawnSoundGain, "1");
 DEFINE_SPADES_SETTING(cg_killSounds, "0");
 DEFINE_SPADES_SETTING(cg_killSoundsPitch, "1");
 DEFINE_SPADES_SETTING(cg_killSoundsGain, "0.2");
+// A short sound on every kill of yours (in a headset a buzz in the gun hand too).
+DEFINE_SPADES_SETTING(cg_killConfirmSound, "1");
 DEFINE_SPADES_SETTING(cg_tracers, "1");
 DEFINE_SPADES_SETTING(cg_hitLog, "0");
 DEFINE_SPADES_SETTING(cg_killfeedIcons, "1");
@@ -73,6 +76,8 @@ DEFINE_SPADES_SETTING(cg_spectatorNoclip, "0");
 SPADES_SETTING(cg_centerMessage);
 SPADES_SETTING(cg_holdAimDownSight);
 SPADES_SETTING(cg_damageIndicators);
+// For tests: the trigger held down (a profile of sustained fire, core_profile)
+DEFINE_SPADES_SETTING(cg_debugHoldFire, "0");
 SPADES_SETTING(cg_corpseDisableGravity);
 
 SPADES_SETTING(cg_killfeedFadeTime);
@@ -177,7 +182,7 @@ namespace spades {
 			Player& p = world->GetLocalPlayer().value();
 
 			World::WeaponRayCastResult res;
-			res = world->WeaponRayCast(p.GetEye(), p.GetFront(), p.GetId());
+			res = world->WeaponRayCast(p.GetToolOrigin(), p.GetToolDirection(), p.GetId());
 
 			IntVector3 col;
 			if (res.hit) {
@@ -188,6 +193,10 @@ namespace spades {
 					col = IntVectorFromColor(
 					  map->GetColorWrapped(res.blockPos.x, res.blockPos.y, res.blockPos.z));
 				}
+			} else if (IsVRActive()) {
+				// In a headset, X at the sky did this by accident, and the fog's
+				// grey looked like the colour resetting itself (a tester's report).
+				return;
 			} else {
 				col = world->GetFogColor();
 			}
@@ -215,6 +224,12 @@ namespace spades {
 
 		void Client::UpdateWorld(float dt, float gameplayDt) {
 			SPADES_MARK_FUNCTION();
+
+			// Mods changed the skin scripts: build the players' skins again.
+			for (std::size_t i = 0; i < clientPlayers.size(); i++) {
+				if (clientPlayers[i] && !clientPlayers[i]->HasCurrentSkins())
+					PlayerObjectSet(static_cast<int>(i));
+			}
 
 			stmp::optional<Player&> maybePlayer = world->GetLocalPlayer();
 
@@ -613,6 +628,8 @@ namespace spades {
 			// sending to the server and passing to the player object.
 			PlayerInput inp = playerInput;
 			WeaponInput winp = weapInput;
+			if ((int)cg_debugHoldFire)
+				winp.primary = true;
 
 
 			bool isToolWeapon = player.IsToolWeapon();
@@ -731,7 +748,11 @@ namespace spades {
 
 			// send position/orientation updates
 			{
-				float POSITION_UPDATE_RATE = 1.0F;			   // 1/s
+				// Once a second is what an internet server accepts: piqueserver drops
+				// position updates closer than 0.7s apart. The training course's server takes
+				// every one, and simulates you from where it thinks you are, so tell it often.
+				float POSITION_UPDATE_RATE =
+				  gui::TrainingHost::Get().IsActive() ? 1.0F / 30.0F : 1.0F;
 				float ORIENTATION_UPDATE_RATE = 1.0F / 120.0F; // 120/s
 
 				Vector3 curPos = player.GetPosition();
@@ -902,6 +923,19 @@ namespace spades {
 
 			if (IsPlayerInFirstPerson(playerId)) {
 				localFireVibrationTime = time;
+				if (p.IsLocalPlayer()) {
+					// A shot's kick, by how hard the gun kicks; braced in two
+					// hands the off hand feels it too.
+					float amp = 0.7F, len = 0.05F;
+					switch (p.GetWeaponType()) {
+						case SHOTGUN_WEAPON: amp = 1.0F, len = 0.09F; break;
+						case SMG_WEAPON: amp = 0.5F, len = 0.035F; break;
+						default: amp = 0.85F, len = 0.07F; break;
+					}
+					VRPulse(VRToolHand(), amp, len, VRHapticShape::Kick);
+					if (vrRig.twoHanded)
+						VRPulse(1 - VRToolHand(), amp * 0.5F, len, VRHapticShape::Kick);
+				}
 			} else {
 				// register sound
 				EmitSoundIndicator(p.GetEye(), SoundType::Action);
@@ -1125,6 +1159,8 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 
 			bool isFirstPerson = IsPlayerInFirstPerson(p.GetId());
+			if (isFirstPerson && p.IsLocalPlayer())
+				VRPulse(VRToolHand(), 0.45F, 0.04F);
 			if (isFirstPerson)
 				localFireVibrationTime = time;
 
@@ -1206,6 +1242,15 @@ namespace spades {
 			if (victim.IsLocalPlayer()) {
 				lastAliveTime = time;
 
+				// Back in the hand after the respawn (a tester asked): it used to
+				// reset to cg_defaultBlockColor.
+				keptBlockColor = victim.GetBlockColor();
+
+				// Numbers not shown yet are for hits the server most likely
+				// refused: it had us dead first, when both fired at once.
+				damageIndicators.remove_if(
+				  [&](const DamageIndicator& d) { return d.showAt > time; });
+
 				// initialize the look-you-are-dead camera
 				if (followCameraState.enabled && !staffSpectating) {
 					Vector3 o = -victim.GetFront();
@@ -1264,6 +1309,19 @@ namespace spades {
 				if (killer.IsLocalPlayer()) {
 					curKills++;
 					curStreak++;
+
+					// Every kill says so (testers asked): the streak sounds start at
+					// two, and the hit sound is the same for a hit that kills.
+					if (cg_killConfirmSound && !IsMuted()) {
+						AudioParam param;
+						param.volume = 0.6F;
+						param.pitch = 1.25F;
+						Handle<IAudioChunk> c =
+						  audioDevice->RegisterSound("Sounds/Feedback/Beep2.opus");
+						audioDevice->PlayLocal(c.GetPointerOrNull(), param);
+					}
+					if (IsVRActive())
+						VRPulse(VRToolHand(), 0.9F, 0.12F);
 					if (kt == KillTypeMelee)
 						meleeKills++;
 					else if (kt == KillTypeGrenade)
@@ -1429,7 +1487,7 @@ namespace spades {
 
 			// create ragdoll corpse
 			if (cg_ragdoll) {
-				auto corp = stmp::make_unique<Corpse>(*renderer, *map, victim, isChristmasOn);
+				auto corp = stmp::make_unique<Corpse>(*renderer, *map, victim, isChristmasOn, &playerOutfits);
 
 				if (kt == KillTypeGrenade) {
 					corp->AddImpulse(MakeVector3(0, 0, -4.0F - SampleRandomFloat() * 4.0F));
@@ -1580,16 +1638,21 @@ namespace spades {
 				// the numbers, so the client stops predicting its own. Predicted hits
 				// on a player add up to one number per shot, so the pellets of a
 				// shotgun blast show their total; `DamageMarkerReceived` does the same
-				// for the server's numbers.
+				// for the server's numbers. Not for teammates: with friendly fire off
+				// (pyspades' default, and the protocol does not say) they take nothing,
+				// as the grenade's numbers already knew.
 				if ((bool)cg_damageIndicators && !isMeleeHit &&
-				    !activeNet->ServerReportsDamage()) {
+				    !activeNet->ServerReportsDamage() &&
+				    (!by.IsTeammate(hurtPlayer) || world->IsModeFFA())) {
 					int dmg = by.GetWeapon().GetDamage(type);
 					auto& indicator = hitScanState.indicatorByPlayer[hurtPlayer.GetId()];
 					if (indicator) {
 						indicator->Accumulate(dmg, time);
 					} else {
-						damageIndicators.push_back(DamageIndicator::Make(
-						  hurtPlayer.GetId(), dmg, hitPos, time, true));
+						DamageIndicator damages = DamageIndicator::Make(
+						  hurtPlayer.GetId(), dmg, hitPos, time, true);
+						damages.showAt = time + DamageIndicatorDelay();
+						damageIndicators.push_back(damages);
 						indicator = &damageIndicators.back();
 					}
 				}
@@ -1926,9 +1989,12 @@ namespace spades {
 
 						// add damage number, unless the server reports the damage it
 						// applied, which then is the only source of the numbers
-						if (!activeNet->ServerReportsDamage())
-							damageIndicators.push_back(DamageIndicator::Make(
-							  player.GetId(), dmg, playerPos, time, false));
+						if (!activeNet->ServerReportsDamage()) {
+							DamageIndicator indicator = DamageIndicator::Make(
+							  player.GetId(), dmg, playerPos, time, false);
+							indicator.showAt = time + DamageIndicatorDelay();
+							damageIndicators.push_back(indicator);
+						}
 
 						// spawn hitmark
 						hitFeedbackIconState = 1.0F;
@@ -1949,6 +2015,8 @@ namespace spades {
 
 		void Client::LocalPlayerHurt(HurtType type, spades::Vector3 source) {
 			SPADES_MARK_FUNCTION();
+
+			VRPulse(-1, 0.9F, 0.15F);
 
 			if (source.GetSquaredLength() < 0.01F) {
 				// should this be handled on the server side?

@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the sprite's set (SPRITE_SET)
+#define ZS_VIEWS_BINDING 3
+#include "Multiview.glsl"
+
 // A sprite drawn in the scene's pass, depth-tested against it: an instance per
 // sprite, its quad made here from the vertex index.
 
@@ -48,4 +52,5 @@ void main() {
 		color.xyz *= SpriteLight(centerRadiusAttribute.xyz, pos);
 	texCoord = corner * 0.5 + 0.5;
 	fogDensity = vec4(SpriteFogDensity(pos));
+	gl_Position = ZS_CORRECT(gl_Position);
 }

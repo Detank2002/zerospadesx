@@ -19,14 +19,24 @@
  */
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
+
 
 // Bloom upsample composite pass.
 // Blends a smaller bloom level (bilinearly upscaled) into the current level:
 //   outColor = mix(large, small, alpha)
 // This is equivalent to the GL bloom's SRC_ALPHA blend with PassThrough.
 
-layout(binding = 0) uniform sampler2D largeTexture; // current composite at output resolution
-layout(binding = 1) uniform sampler2D smallTexture; // smaller level (upscaled by bilinear)
+layout(binding = 0) uniform ZS_EYE_SAMPLER largeTexture; // current composite at output resolution
+layout(binding = 1) uniform ZS_EYE_SAMPLER smallTexture; // smaller level (upscaled by bilinear)
 
 layout(push_constant) uniform Params {
     float alpha;
@@ -36,7 +46,7 @@ layout(location = 0) in  vec2 texCoord;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    vec3 large = texture(largeTexture, texCoord).rgb;
-    vec3 small = texture(smallTexture, texCoord).rgb;
+    vec3 large = ZS_EYE_TEX(largeTexture, texCoord).rgb;
+    vec3 small = ZS_EYE_TEX(smallTexture, texCoord).rgb;
     outColor = vec4(mix(large, small, params.alpha), 1.0);
 }

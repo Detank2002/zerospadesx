@@ -58,12 +58,15 @@ namespace spades {
 			VkPipeline pipeline;
 			VkPipelineLayout blurLayout;
 			VkPipeline blurPipeline;
+			// Multiview twins (both eyes in one pass), made only in multiview.
+			VkRenderPass ppRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline pipelineMV = VK_NULL_HANDLE;
 
 			// The fog colour the tint is worked out from, eased towards the scene's a
 			// little every frame as GL does; negative until the first frame
 			Vector3 smoothedFogColor{-1.0F, -1.0F, -1.0F};
 
-			static constexpr int MAX_FRAME_SLOTS = MaxFramesInFlight;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 
@@ -74,12 +77,13 @@ namespace spades {
 
 			VkShaderModule LoadSPIRV(const char* path);
 
-			VkFramebuffer MakeFramebuffer(VulkanImage* image, int frameSlot);
+			VkFramebuffer MakeFramebuffer(VulkanImage* image, int frameSlot, VkRenderPass pass);
 			VkDescriptorSet BindTexture(int frameSlot, VkImageView view);
 			VkDescriptorSet BindTextures(int frameSlot, VkImageView view, VkImageView blurred);
 
 			/** A full-screen pipeline drawing `fragmentShader` with `pipelineLayout` */
-			VkPipeline BuildPipeline(const char* fragmentShader, VkPipelineLayout pipelineLayout);
+			VkPipeline BuildPipeline(const char* fragmentShader, VkPipelineLayout pipelineLayout,
+			                         VkRenderPass renderPass = VK_NULL_HANDLE);
 
 			void CreatePipeline() override {}
 			void CreateRenderPass() override {}
@@ -90,6 +94,8 @@ namespace spades {
 
 			void Filter(VkCommandBuffer cmd,
 			            VulkanImage* input, VulkanImage* output) override;
+
+			bool SupportsLayers() const override { return pipelineMV != VK_NULL_HANDLE; }
 		};
 
 	} // namespace draw

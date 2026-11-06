@@ -19,6 +19,9 @@
  */
 
 #include <cstdarg>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include <ctime>
 #include <deque>
 #include <map>
@@ -255,6 +258,13 @@ namespace spades {
 		// (1) stdout
 		std::string outStr = EscapeControlCharacters(buf);
 		printf("%s", outStr.c_str());
+#if defined(__ANDROID__)
+		// (1b) logcat: Android has no stdout anyone reads, and a release build's
+		// log file is out of reach without the device. A Quest that failed at
+		// start showed only "ZeroSpades Fatal Error" in logcat, not the error.
+		__android_log_print(ANDROID_LOG_INFO, "ZeroSpades", "[%s:%d] %s", fn.c_str(), line,
+		                    str.c_str());
+#endif
 
 		// (2) The log file a.k.a. `SystemMessages.log`
 		if (logStream || !attemptedToInitializeLog) {

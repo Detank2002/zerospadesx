@@ -109,6 +109,10 @@ namespace spades {
 			l.AddToggleField(_Tr("Preferences", "Ignore Private Messages"), "cg_ignorePrivateMessages");
 			l.AddSliderField(_Tr("Preferences", "Master Volume"), "s_volume", 0, 100, 1,
 			                 NumberFormatter(0, "%"));
+			l.AddChoiceField(_Tr("Preferences", "Headphone 3D Sound (Next Start)"), "s_hrtf",
+			                 {_Tr("Preferences", "AUTO"), _Tr("Preferences", "ON"),
+			                  _Tr("Preferences", "OFF")},
+			                 {-1, 1, 0});
 			l.AddVolumeSlider(_Tr("Preferences", "Death Camera Volume"), "cg_deathSoundGain");
 			l.AddVolumeSlider(_Tr("Preferences", "Respawn Beep Volume"), "cg_respawnSoundGain");
 			l.AddVolumeSlider(_Tr("Preferences", "Hit Feedback Volume"), "cg_hitFeedbackSoundGain");
@@ -370,6 +374,15 @@ namespace spades {
 			l.headingNav = nav;
 
 			l.AddHeading(_Tr("Preferences", "General"));
+			l.AddQualityPresetField(_Tr("Preferences", "Quality Preset"), GetPCQualityPresets(),
+			                        {_Tr("Preferences", "Low"), _Tr("Preferences", "Medium"),
+			                         _Tr("Preferences", "High"), _Tr("Preferences", "Ultra")},
+			                        _Tr("Preferences", "Custom"));
+			l.AddHelp(_Tr("Preferences",
+				"Sets the anti-aliasing, shadows, water, particles, lighting and "
+				"effects together. High is the defaults. Changing one of them by "
+				"hand makes it Custom. Anti-aliasing takes effect at the next start, "
+				"the rest at the next map."));
 			l.AddSliderField(_Tr("Preferences", "Render Scale"), "r_scale", 0.2F, 1, 0.01F,
 			                 NumberFormatter(0, "%", "", 100));
 			l.AddSliderField(_Tr("Preferences", "Render Scaling Filter"), "r_scaleFilter", 0, 2, 1,
@@ -425,6 +438,123 @@ namespace spades {
 			                 NumberFormatter(0, _Tr("Preferences", " Threads")));
 			l.AddSliderField(_Tr("Preferences", "Undersampling"), "r_swUndersampling", 0, 4, 1,
 			                 NumberFormatter(0, "x"));
+
+			l.FinishLayout();
+		}
+
+		// -- VROptionsPanel --
+
+		VROptionsPanel::VROptionsPanel(UIManager* manager, const PreferenceViewOptions& options,
+		                               client::FontManager* fontManager, HeadingNavIndex* nav)
+		    : UIElement(manager) {
+			(void)options;
+			layouter = Handle<StandardPreferenceLayouter>::New(this, fontManager);
+			StandardPreferenceLayouter& l = *layouter;
+			l.headingNav = nav;
+
+			// 0 means off (or "smooth" for turning) on several sliders.
+			auto zeroMeans = [](std::string zero, int digits, std::string suffix) {
+				Formatter f = NumberFormatter(digits, suffix);
+				f.custom = [zero, digits, suffix](float value) -> std::string {
+					if (value <= 0.0F)
+						return zero;
+					return FormatConfigNumber(digits, "", suffix, 1.0F, value);
+				};
+				return f;
+			};
+			const std::string restart = _Tr("Preferences", " (restart)");
+
+			l.AddHeading(_Tr("Preferences", "Movement and Comfort"));
+			l.AddSliderField(_Tr("Preferences", "Turning"), "vr_snapTurn", 0, 90, 15,
+			                 zeroMeans(_Tr("Preferences", "Smooth"), 0, "\xc2\xb0 snap"));
+			l.AddSliderField(_Tr("Preferences", "Smooth Turn Speed"), "vr_smoothTurnSpeed", 60, 360,
+			                 30, NumberFormatter(0, "\xc2\xb0/s"));
+			l.AddToggleField(_Tr("Preferences", "Comfort Camera When Dead"), "vr_comfortCamera");
+			l.AddSliderField(_Tr("Preferences", "Comfort Vignette"), "vr_vignette", 0, 1, 0.1F,
+			                 zeroMeans(_Tr("Preferences", "Off"), 1, ""));
+			l.AddToggleField(_Tr("Preferences", "Walking In The Room Moves You"), "vr_roomScale");
+			l.AddToggleField(_Tr("Preferences", "Controllers Only (No Keyboard Or Mouse)"),
+			                 "vr_controllersOnly");
+			l.AddToggleField(_Tr("Preferences", "Seated"), "vr_seated");
+			l.AddToggleField(_Tr("Preferences", "Hold The Stick In To Sprint"), "vr_sprintHold");
+			l.AddSliderField(_Tr("Preferences", "Crouch When Head Drops"), "vr_crouchAt", 0.15F,
+			                 0.6F, 0.05F, NumberFormatter(2, " m"));
+			l.AddSliderField(_Tr("Preferences", "World Scale"), "vr_worldScale", 1.0F, 2.0F, 0.05F,
+			                 NumberFormatter(2, _Tr("Preferences", " blocks/m")));
+
+			l.AddHeading(_Tr("Preferences", "Hands and Tools"));
+			l.AddToggleField(_Tr("Preferences", "Left Handed"), "vr_leftHanded");
+			l.AddSliderField(_Tr("Preferences", "Gun Angle"), "vr_aimTilt", -10, 40, 1,
+			                 NumberFormatter(0, _Tr("Preferences", "\xc2\xb0 down")));
+			l.AddToggleField(_Tr("Preferences", "Laser Pointer"), "vr_laser");
+			l.AddToggleField(_Tr("Preferences", "Solid Tools"), "vr_toolCollision");
+			l.AddSliderField(_Tr("Preferences", "Aim Smoothing"), "vr_aimSmooth", 0, 1, 0.1F,
+			                 zeroMeans(_Tr("Preferences", "Off"), 1, ""));
+			l.AddToggleField(_Tr("Preferences", "Reload By Hand (Magazine From The Belt)"),
+			                 "vr_reloadGesture");
+			l.AddToggleField(_Tr("Preferences", "X And Y Switch Tools (Instead Of Colour And Map)"),
+			                 "vr_toolButtons");
+			l.AddToggleField(_Tr("Preferences", "Rifle Scope"), "vr_scope");
+			// The same setting as the monitor's: any choice but off puts the
+			// reflex sight on every gun in the hand, its dot at infinity.
+			l.AddChoiceField(_Tr("Preferences", "Reflex Sight"), "cg_reflexScope",
+			                 {_Tr("Preferences", "OFF"), _Tr("Preferences", "Dot"),
+			                  _Tr("Preferences", "Cross")},
+			                 {0, 3, 4});
+			l.AddSliderField(_Tr("Preferences", "Swing Spade To Hit"), "vr_swingSpeed", 0, 5, 0.25F,
+			                 zeroMeans(_Tr("Preferences", "Off"), 2, " m/s"));
+			l.AddSliderField(_Tr("Preferences", "Full Grenade Throw"), "vr_throwSpeed", 2, 10, 0.5F,
+			                 NumberFormatter(1, " m/s"));
+
+			l.AddHeading(_Tr("Preferences", "Body"));
+			l.AddToggleField(_Tr("Preferences", "Show Your Body"), "vr_showBody");
+			l.AddChoiceField(_Tr("Preferences", "Your Arms"), "vr_showArms",
+			                 {_Tr("Preferences", "HANDS"), _Tr("Preferences", "FOREARMS"),
+			                  _Tr("Preferences", "WHOLE ARMS")},
+			                 {0, 1, 2});
+
+			l.AddHeading(_Tr("Preferences", "HUD"));
+			l.AddToggleField(_Tr("Preferences", "HUD On The Wrist"), "vr_wristHud");
+			l.AddToggleField(_Tr("Preferences", "Hold The Big Map In Your Hand"), "vr_heldMap");
+			l.AddSliderField(_Tr("Preferences", "Wrist Panel Width"), "vr_wristWidth", 0.12F, 0.4F,
+			                 0.02F, NumberFormatter(2, " m"));
+			l.AddSliderField(_Tr("Preferences", "Menu Panel Distance"), "vr_hudDistance", 0.8F, 3.0F,
+			                 0.1F, NumberFormatter(1, " m"));
+			l.AddSliderField(_Tr("Preferences", "Menu Panel Width"), "vr_hudWidth", 0.8F, 3.0F, 0.1F,
+			                 NumberFormatter(1, " m"));
+			l.AddSliderField(_Tr("Preferences", "Text Size"), "vr_uiWidth", 960, 1920, 160,
+			                 NumberFormatter(0, _Tr("Preferences", " px wide, less is bigger") +
+			                                      restart));
+			l.AddToggleField(_Tr("Preferences", "Frame Rate On The Wrist"), "vr_showFps");
+
+			l.AddHeading(_Tr("Preferences", "Picture"));
+			l.AddSliderField(_Tr("Preferences", "Brightest Blocks"), "vr_brightness", 0.5F, 1.0F,
+			                 0.05F, NumberFormatter(0, "%" + _Tr("Preferences", " (next map)"), "", 100));
+
+			l.AddHeading(_Tr("Preferences", "Performance"));
+			l.AddQualityPresetField(_Tr("Preferences", "Headset Quality"),
+			                        GetHeadsetQualityPresets(),
+			                        {_Tr("Preferences", "Performance"),
+			                         _Tr("Preferences", "Balanced"),
+			                         _Tr("Preferences", "Quality")},
+			                        _Tr("Preferences", "Custom"));
+			l.AddHelp(_Tr("Preferences",
+				"Sets the graphics for a headset together. Performance is what a "
+				"Quest starts with; Balanced adds sharper shadows, textures and "
+				"colour correction; Quality soft particles, for a Quest 3 or a PC. "
+				"On a PC it changes the Graphics tab too. Takes effect at the next "
+				"map (anti-aliasing and both eyes in one pass at the next start)."));
+			l.AddToggleField(_Tr("Preferences", "Extra Processing Power"), "vr_performanceBoost");
+			l.AddHelp(_Tr("Preferences",
+				"Asks a standalone headset to keep its processor and graphics at "
+				"higher speeds. Smoother in busy scenes; the battery runs down sooner "
+				"and the headset gets warmer."));
+			l.AddToggleField(_Tr("Preferences", "Hold The Frame Rate"), "vr_dynamicResolution");
+			l.AddToggleField(_Tr("Preferences", "Both Eyes In One Pass (Next Start)"), "vr_multiview");
+			l.AddSliderField(_Tr("Preferences", "Eye Resolution"), "vr_renderScale", 0.5F, 1.5F,
+			                 0.05F, NumberFormatter(0, "%" + restart, "", 100));
+			l.AddSliderField(_Tr("Preferences", "Text Sharpness"), "vr_uiSupersample", 1, 3, 1,
+			                 NumberFormatter(0, "x" + restart));
 
 			l.FinishLayout();
 		}

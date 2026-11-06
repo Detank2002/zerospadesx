@@ -49,6 +49,10 @@ namespace spades {
 
 			bool HasLocalPlayer() const;
 			bool IsDemoMode() const;
+			/** Playing in a headset. */
+			bool IsVRActive() const;
+			/** Client::RequestVRHeightReset. */
+			void ResetVRHeight();
 
 			float GetClientTime() const;
 			

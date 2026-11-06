@@ -20,6 +20,7 @@
 
 #include "VulkanBloomFilter.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanBuffer.h"
 #include "VulkanImageWrapper.h"
 #include "VulkanFramebufferManager.h"
@@ -87,7 +88,7 @@ namespace spades {
 			    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 			noiseImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 			                          VK_SAMPLER_ADDRESS_MODE_REPEAT);
-			for (std::uint32_t i = 0; i < device->GetMaxFramesInFlight(); i++)
+			for (std::size_t i = 0; i < renderer.GetFrameSlotCount(); i++)
 				noiseStaging.push_back(Handle<VulkanBuffer>::New(
 				  device, (VkDeviceSize)(128 * 128 * 4), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 				  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
@@ -107,6 +108,9 @@ namespace spades {
 			}
 
 			if (compositePipeline  != VK_NULL_HANDLE) vkDestroyPipeline(dev, compositePipeline,  nullptr);
+			for (VkPipeline p : {downsamplePipelineMV, gaussPipelineMV, upsamplePipelineMV, compositePipelineMV})
+				if (p != VK_NULL_HANDLE) vkDestroyPipeline(dev, p, nullptr);
+			if (ppRenderPassMV != VK_NULL_HANDLE) vkDestroyRenderPass(dev, ppRenderPassMV, nullptr);
 			if (upsamplePipeline   != VK_NULL_HANDLE) vkDestroyPipeline(dev, upsamplePipeline,   nullptr);
 			if (gaussPipeline      != VK_NULL_HANDLE) vkDestroyPipeline(dev, gaussPipeline,      nullptr);
 			if (downsamplePipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, downsamplePipeline, nullptr);
@@ -145,6 +149,13 @@ namespace spades {
 			    VK_IMAGE_LAYOUT_UNDEFINED,
 			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			    &dep);
+			if (renderer.IsMultiview())
+				ppRenderPassMV = CreateSimpleColorRenderPass(
+				    dev, colorFormat,
+				    VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+				    VK_IMAGE_LAYOUT_UNDEFINED,
+				    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				    &dep, 0x3);
 
 			VkSamplerCreateInfo si{};
 			si.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -194,6 +205,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -297,7 +309,8 @@ namespace spades {
 			}
 
 			// Helper: build a graphics pipeline ───────────────────
-			auto MakePipeline = [&](VkShaderModule fsModule, VkPipelineLayout layout) {
+			auto MakePipeline = [&](VkShaderModule fsModule, VkPipelineLayout layout,
+			                        VkRenderPass passFor) {
 				VkPipelineShaderStageCreateInfo stages[2]{};
 				stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
 				              VK_SHADER_STAGE_VERTEX_BIT,   vs,       "main", nullptr};
@@ -322,7 +335,7 @@ namespace spades {
 				pi.pColorBlendState    = &blend;
 				pi.pDynamicState       = &dyn;
 				pi.layout              = layout;
-				pi.renderPass          = ppRenderPass;
+				pi.renderPass          = passFor;
 				pi.subpass             = 0;
 
 				VkPipeline p;
@@ -331,10 +344,28 @@ namespace spades {
 				return p;
 			};
 
-			downsamplePipeline = MakePipeline(passthroughFS, downsampleLayout);
-			gaussPipeline      = MakePipeline(gaussFS,       gaussLayout);
-			upsamplePipeline   = MakePipeline(upsampleFS,    upsampleLayout);
-			compositePipeline  = MakePipeline(compositeFS,   compositeLayout);
+			downsamplePipeline = MakePipeline(passthroughFS, downsampleLayout, ppRenderPass);
+			gaussPipeline      = MakePipeline(gaussFS,       gaussLayout,      ppRenderPass);
+			upsamplePipeline   = MakePipeline(upsampleFS,    upsampleLayout,   ppRenderPass);
+			compositePipeline  = MakePipeline(compositeFS,   compositeLayout,  ppRenderPass);
+
+			// Multiview: the same passes over both eyes' layers, each fragment
+			// sampling its own (.mv shaders read sampler2DArrays at gl_ViewIndex).
+			if (ppRenderPassMV != VK_NULL_HANDLE) {
+				const char* names[4] = {"Shaders/Vulkan/PostFilters/PassThrough.vk.fs.mv.spv",
+				                        "Shaders/Vulkan/PostFilters/Gauss1DRGBA.vk.fs.mv.spv",
+				                        "Shaders/Vulkan/PostFilters/BloomUpsample.vk.fs.mv.spv",
+				                        "Shaders/Vulkan/PostFilters/BloomComposite.vk.fs.mv.spv"};
+				VkPipelineLayout layouts[4] = {downsampleLayout, gaussLayout, upsampleLayout,
+				                               compositeLayout};
+				VkPipeline* outs[4] = {&downsamplePipelineMV, &gaussPipelineMV, &upsamplePipelineMV,
+				                       &compositePipelineMV};
+				for (int k = 0; k < 4; k++) {
+					VkShaderModule fsMV = LoadSPIRV(names[k]);
+					*outs[k] = MakePipeline(fsMV, layouts[k], ppRenderPassMV);
+					vkDestroyShaderModule(dev, fsMV, nullptr);
+				}
+			}
 
 			vkDestroyShaderModule(dev, vs,           nullptr);
 			vkDestroyShaderModule(dev, passthroughFS,nullptr);
@@ -489,7 +520,8 @@ namespace spades {
 		                                        uint32_t width, uint32_t height,
 		                                        VkPipeline pipeline,
 		                                        VkPipelineLayout layout,
-		                                        VkDescriptorSet ds) {
+		                                        VkDescriptorSet ds, const void* pushData,
+		                                        uint32_t pushSize) {
 			VkClearValue cv{};
 			cv.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
 
@@ -511,6 +543,10 @@ namespace spades {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			                        layout, 0, 1, &ds, 0, nullptr);
+			// After the bind: pushed ahead of it, validation saw the values as unset
+			// for the multiview pipelines.
+			if (pushData)
+				vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pushSize, pushData);
 			vkCmdDraw(cmd, 3, 1, 0, 0);
 
 			vkCmdEndRenderPass(cmd);
@@ -538,6 +574,12 @@ namespace spades {
 
 			UpdateNoise(cmd, frameSlot);
 
+			// Both eyes at once when given both layers (multiview): every level
+			// is then two layers too, drawn in one pass each.
+			const bool layered = input->GetArrayLayers() > 1 && compositePipelineMV != VK_NULL_HANDLE;
+			const VkRenderPass rpUse = layered ? ppRenderPassMV : ppRenderPass;
+			const uint32_t layers = layered ? 2U : 1U;
+
 			VulkanTemporaryImagePool* pool = renderer.GetTemporaryImagePool();
 
 			// ── 1. Downsample ─────────────────────────────────────────
@@ -556,25 +598,25 @@ namespace spades {
 			// `src` at half its size (rounded up), blurred: a downsample then a
 			// Gauss1D H+V pass, as GL does for the source and every level
 			auto downsampleBlurred = [&](VkImageView src, uint32_t nw, uint32_t nh) {
-				Handle<VulkanImage> dst = pool->Acquire(nw, nh, colorFormat);
-				VkFramebuffer fb        = MakeFramebuffer(ppRenderPass, dst.GetPointerOrNull(), frameSlot);
+				Handle<VulkanImage> dst = pool->Acquire(nw, nh, colorFormat, layers);
+				VkFramebuffer fb        = MakeFramebuffer(rpUse, dst.GetPointerOrNull(), frameSlot);
 				VkDescriptorSet ds      = BindTexture(frameSlot, singleSamplerDSL, src);
 
-				DrawFullscreen(cmd, ppRenderPass, fb, nw, nh,
-				               downsamplePipeline, downsampleLayout, ds);
+				DrawFullscreen(cmd, rpUse, fb, nw, nh,
+				               (layered ? downsamplePipelineMV : downsamplePipeline), downsampleLayout, ds);
 
 				for (int pass = 0; pass < 2; ++pass) {
 					const GaussPushConstants gauss{{pass == 0 ? 1.0f / (float)nw : 0.0f,
 					                                pass == 0 ? 0.0f : 1.0f / (float)nh}};
-					PushConstants(cmd, gaussLayout, VK_SHADER_STAGE_FRAGMENT_BIT, gauss);
 
-					Handle<VulkanImage> blurred = pool->Acquire(nw, nh, colorFormat);
-					VkFramebuffer bfb   = MakeFramebuffer(ppRenderPass,
+					Handle<VulkanImage> blurred = pool->Acquire(nw, nh, colorFormat, layers);
+					VkFramebuffer bfb   = MakeFramebuffer(rpUse,
 					                                      blurred.GetPointerOrNull(), frameSlot);
 					VkDescriptorSet bds = BindTexture(frameSlot, singleSamplerDSL,
 					                                  dst->GetImageView());
-					DrawFullscreen(cmd, ppRenderPass, bfb, nw, nh,
-					               gaussPipeline, gaussLayout, bds);
+					DrawFullscreen(cmd, rpUse, bfb, nw, nh,
+					               (layered ? gaussPipelineMV : gaussPipeline), gaussLayout, bds,
+					               &gauss, sizeof(gauss));
 
 					gaussTrash.push_back(std::move(dst));
 					dst = std::move(blurred);
@@ -628,18 +670,17 @@ namespace spades {
 				uint32_t nw = static_cast<uint32_t>(large->GetWidth());
 				uint32_t nh = static_cast<uint32_t>(large->GetHeight());
 
-				// Push constant before the draw inside DrawFullscreen.
-				PushConstants(cmd, upsampleLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-				              UpsamplePushConstants{alpha});
+				const UpsamplePushConstants upsample{alpha};
 
-				Handle<VulkanImage> blended = pool->Acquire(nw, nh, colorFormat);
-				VkFramebuffer fb   = MakeFramebuffer(ppRenderPass, blended.GetPointerOrNull(), frameSlot);
+				Handle<VulkanImage> blended = pool->Acquire(nw, nh, colorFormat, layers);
+				VkFramebuffer fb   = MakeFramebuffer(rpUse, blended.GetPointerOrNull(), frameSlot);
 				VkDescriptorSet ds = BindTextures(frameSlot, dualSamplerDSL,
 				                                  large->GetImageView(),
 				                                  small->GetImageView());
 
-				DrawFullscreen(cmd, ppRenderPass, fb, nw, nh,
-				               upsamplePipeline, upsampleLayout, ds);
+				DrawFullscreen(cmd, rpUse, fb, nw, nh,
+				               (layered ? upsamplePipelineMV : upsamplePipeline), upsampleLayout, ds,
+				               &upsample, sizeof(upsample));
 
 				toReturn.push_back(std::move(levels[i - 1]));
 				levels[i - 1] = std::move(blended);
@@ -665,17 +706,17 @@ namespace spades {
 			                         dust ? dust->GetSampler() : linearSampler,
 			                         noiseImage->GetSampler()};
 
-			VkFramebuffer fb   = MakeFramebuffer(ppRenderPass, output, frameSlot);
+			VkFramebuffer fb   = MakeFramebuffer(rpUse, output, frameSlot);
 			VkDescriptorSet ds = BindTextures4(frameSlot, views, samplers);
 
 			// noiseTexCoordFactor, exactly as GLLensDustFilter computes it.
 			float facX = renderer.GetRenderWidth() / 128.0f;
 			float facY = renderer.GetRenderHeight() / 128.0f;
 			const CompositePushConstants composite{{facX, facY, facX / 128.0f, facY / 128.0f}};
-			PushConstants(cmd, compositeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, composite);
 
-			DrawFullscreen(cmd, ppRenderPass, fb, rw, rh,
-			               compositePipeline, compositeLayout, ds);
+			DrawFullscreen(cmd, rpUse, fb, rw, rh,
+			               (layered ? compositePipelineMV : compositePipeline), compositeLayout, ds,
+			               &composite, sizeof(composite));
 
 			// Return all temporary images (deferred to avoid pool reuse hazards).
 			for (auto& img : gaussTrash)

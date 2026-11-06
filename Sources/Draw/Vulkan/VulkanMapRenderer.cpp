@@ -30,6 +30,7 @@
 #include "VulkanImageWrapper.h"
 #include "VulkanSceneLights.h"
 #include <Gui/SDLVulkanDevice.h>
+#include <cstddef>
 #include <Client/GameMap.h>
 #include <Core/Debug.h>
 #include <Core/Exception.h>
@@ -370,19 +371,27 @@ namespace spades {
 			fragShaderStageInfo.module = fragShaderModule;
 			fragShaderStageInfo.pName = "main";
 
-			// Specialization constant: USE_RADIOSITY (SceneLight/MapLight.glsl),
+			// Specialization constants: USE_RADIOSITY (SceneLight/MapLight.glsl),
 			// for the physical shader as for the basic one — picks the
-			// MapRadiosityNull vs MapRadiosity ambient permutation.
-			int32_t useRadiosity = (int)renderer.GetSettings().r_radiosity != 0 ? 1 : 0;
-			VkSpecializationMapEntry specEntry{};
-			specEntry.constantID = 0;
-			specEntry.offset = 0;
-			specEntry.size = sizeof(int32_t);
+			// MapRadiosityNull vs MapRadiosity ambient permutation — and VOXEL_PEAK
+			// (vr_brightness, both shaders).
+			struct {
+				int32_t useRadiosity;
+				float voxelPeak;
+			} specData{(int)renderer.GetSettings().r_radiosity != 0 ? 1 : 0,
+			           renderer.GetVRVoxelPeak()};
+			VkSpecializationMapEntry specEntries[2]{};
+			specEntries[0].constantID = 0;
+			specEntries[0].offset = offsetof(decltype(specData), useRadiosity);
+			specEntries[0].size = sizeof(int32_t);
+			specEntries[1].constantID = 1;
+			specEntries[1].offset = offsetof(decltype(specData), voxelPeak);
+			specEntries[1].size = sizeof(float);
 			VkSpecializationInfo specInfo{};
-			specInfo.mapEntryCount = 1;
-			specInfo.pMapEntries = &specEntry;
-			specInfo.dataSize = sizeof(int32_t);
-			specInfo.pData = &useRadiosity;
+			specInfo.mapEntryCount = 2;
+			specInfo.pMapEntries = specEntries;
+			specInfo.dataSize = sizeof(specData);
+			specInfo.pData = &specData;
 			fragShaderStageInfo.pSpecializationInfo = &specInfo;
 
 			VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
@@ -570,7 +579,7 @@ namespace spades {
 			// shadow renderer is created before the map renderer (see SetGameMap).
 			// Set 2 = the frame's dynamic lights. Set 3 = the pass's view.
 			VulkanShadowMapRenderer* smr = renderer.GetShadowMapRenderer();
-			VkDescriptorSetLayout setLayouts[4] = {
+			std::vector<VkDescriptorSetLayout> setLayouts{
 			    descriptorSetLayout,
 			    smr ? smr->GetSamplingSetLayout() : VK_NULL_HANDLE,
 			    renderer.GetSceneLights().GetSetLayout(),
@@ -580,8 +589,8 @@ namespace spades {
 
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutInfo.setLayoutCount = 4;
-			pipelineLayoutInfo.pSetLayouts = setLayouts;
+			pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+			pipelineLayoutInfo.pSetLayouts = setLayouts.data();
 			pipelineLayoutInfo.pushConstantRangeCount = 1;
 			pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 

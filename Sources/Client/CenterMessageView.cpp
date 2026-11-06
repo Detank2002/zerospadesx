@@ -30,7 +30,7 @@ DEFINE_SPADES_SETTING(cg_centerMessageSmallFont, "0");
 namespace spades {
 	namespace client {
 		CenterMessageView::CenterMessageView(Client* client, IFont* font)
-		    : renderer(client->GetRenderer()), font(font) {
+		    : renderer(client->GetRenderer()), font(font), baseFont(font) {
 			SPADES_MARK_FUNCTION();
 
 			for (int i = 0; i < 2; i++)
@@ -51,7 +51,8 @@ namespace spades {
 		}
 
 		float CenterMessageView::GetLineHeight() {
-			return cg_centerMessageSmallFont ? 24.0F : 34.0F;
+			// The wrist panel's font (SetFont) is the large one
+			return cg_centerMessageSmallFont && font == baseFont ? 24.0F : 34.0F;
 		}
 
 		void CenterMessageView::AddMessage(const std::string& msg) {

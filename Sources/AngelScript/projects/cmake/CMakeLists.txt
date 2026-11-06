@@ -67,8 +67,10 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
         endif()
 endif()
 
-# Add ARM64 support for Linux
-if(UNIX AND NOT APPLE AND NOT ANDROID AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+# Add ARM64 support for Linux and Android (the same AAPCS64 calling convention;
+# as_config.h selects AS_ARM64 for both). Without it on Android the native
+# calling code was missing at link time.
+if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
         enable_language(ASM)
         if(CMAKE_ASM_COMPILER_WORKS)
                 set(ANGELSCRIPT_SOURCE ${ANGELSCRIPT_SOURCE} ../../source/as_callfunc_arm64.cpp ../../source/as_callfunc_arm64_gcc.S)

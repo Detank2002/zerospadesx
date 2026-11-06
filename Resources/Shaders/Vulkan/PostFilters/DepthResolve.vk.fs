@@ -42,8 +42,16 @@
 
 layout(location = 0) out float fragDepth;
 
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+layout(set = 0, binding = 0) uniform sampler2DMSArray depthMS;
+#define DEPTH_AT(p) texelFetch(depthMS, ivec3((p), gl_ViewIndex), 0)
+#else
 layout(set = 0, binding = 0) uniform sampler2DMS depthMS;
+#define DEPTH_AT(p) texelFetch(depthMS, (p), 0)
+#endif
 
 void main() {
-    fragDepth = texelFetch(depthMS, ivec2(gl_FragCoord.xy), 0).r;
+    fragDepth = DEPTH_AT(ivec2(gl_FragCoord.xy)).r;
 }

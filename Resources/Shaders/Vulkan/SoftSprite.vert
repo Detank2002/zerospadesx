@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the sprite's set (SPRITE_SET)
+#define ZS_VIEWS_BINDING 3
+#include "Multiview.glsl"
+
 // A soft sprite: an instance per sprite, its quad made here from the vertex index
 // and brought to the front of the volume it stands for, which the fragment shader
 // fades where the scene's depth cuts into.
@@ -88,7 +92,10 @@ void main() {
 
 	// Depth texture coord (screen space).
 	// The Y-flip viewport maps NDC_y → framebuffer_y inversely, so UV_y = 0.5 - NDC_y * 0.5.
-	vec2 ndc = gl_Position.xy / gl_Position.w;
+	// In this eye's picture: in multiview, eye 0's put the right eye's soft
+	// edge where the left eye saw the scene
+	vec4 eyeClip = ZS_CORRECT(gl_Position);
+	vec2 ndc = eyeClip.xy / eyeClip.w;
 	texCoord.zw = vec2(0.5 + ndc.x * 0.5, 0.5 - ndc.y * 0.5);
 
 	fogDensity = vec4(SpriteFogDensity(pos));
@@ -101,4 +108,5 @@ void main() {
 
 	depthRange.y /= nearFar;
 	depthRange.z *= nearFar;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

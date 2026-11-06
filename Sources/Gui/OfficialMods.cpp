@@ -19,6 +19,7 @@
  */
 
 #include "OfficialMods.h"
+#include "CurlTls.h"
 
 #include <cctype>
 #include <cstdio>
@@ -146,6 +147,7 @@ namespace spades {
 
 			std::string body;
 			curl_easy_setopt(handle.get(), CURLOPT_URL, kReleasesApiUrl);
+			SetupCurlTls(handle.get()); // a CA store on Android, where curl has none
 			curl_easy_setopt(handle.get(), CURLOPT_USERAGENT, PACKAGE_STRING);
 			curl_easy_setopt(handle.get(), CURLOPT_HTTPHEADER, headers.get());
 			curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, WriteToString);

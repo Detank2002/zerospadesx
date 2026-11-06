@@ -732,18 +732,19 @@ namespace spades {
 			up = Vector3::Cross(lightDir, side).Normalize();
 
 			const client::SceneDefinition& def = renderer.GetSceneDef();
-			float tanX = std::tan(def.fovX * 0.5f);
-			float tanY = std::tan(def.fovY * 0.5f);
+			// The view's own corners: an off-centre view's cascade covers what it
+			// sees, not a centred box around it.
+			const client::FovTangents f = def.GetFovTangents();
 
 			Vector3 frustum[8];
-			frustum[0] = FrustumCoord(def, tanX, tanY, near);
-			frustum[1] = FrustumCoord(def, tanX, -tanY, near);
-			frustum[2] = FrustumCoord(def, -tanX, tanY, near);
-			frustum[3] = FrustumCoord(def, -tanX, -tanY, near);
-			frustum[4] = FrustumCoord(def, tanX, tanY, far);
-			frustum[5] = FrustumCoord(def, tanX, -tanY, far);
-			frustum[6] = FrustumCoord(def, -tanX, tanY, far);
-			frustum[7] = FrustumCoord(def, -tanX, -tanY, far);
+			frustum[0] = FrustumCoord(def, f.right, f.up, near);
+			frustum[1] = FrustumCoord(def, f.right, f.down, near);
+			frustum[2] = FrustumCoord(def, f.left, f.up, near);
+			frustum[3] = FrustumCoord(def, f.left, f.down, near);
+			frustum[4] = FrustumCoord(def, f.right, f.up, far);
+			frustum[5] = FrustumCoord(def, f.right, f.down, far);
+			frustum[6] = FrustumCoord(def, f.left, f.up, far);
+			frustum[7] = FrustumCoord(def, f.left, f.down, far);
 
 			// XY bounds of the frustum in light space (side/up axes).
 			float minX, maxX, minY, maxY;

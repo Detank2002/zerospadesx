@@ -42,7 +42,9 @@
 #define CASING_BOUNCE_DIST_SQ (CASING_BOUNCE_DIST * CASING_BOUNCE_DIST)
 
 #define MELEE_DISTANCE 3
-#define MAX_BLOCK_DISTANCE 3
+// Building reaches one block further than the stock client's 3, for monitor and
+// VR alike; servers check a box of 6 (pyspades' collision_3d), so it is accepted.
+#define MAX_BLOCK_DISTANCE 4
 #define MAX_DIG_DISTANCE 3
 
 #define CHATPREFIX_BIG	   "C% "

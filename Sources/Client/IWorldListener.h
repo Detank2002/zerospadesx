@@ -48,6 +48,12 @@ namespace spades {
 			virtual void PlayerJumped(Player&) = 0;
 			virtual void PlayerLanded(Player&, bool hurt) = 0;
 			virtual void PlayerFiredWeapon(Player&) = 0;
+			/** A local player aiming with a headset's hand fired: the recoil the
+			 * monitor would have turned the view by (radians; yaw as Player::Turn
+			 * takes it, pitch up), already scaled for walking, crouching and being
+			 * in the air. The view is the head's and cannot be turned, so the
+			 * listener turns the gun instead. */
+			virtual void PlayerRecoiledInVR(Player&, float /*yaw*/, float /*pitch*/) {}
 			virtual void PlayerEjectedBrass(Player&) = 0;
 			virtual void PlayerDryFiredWeapon(Player&) = 0;
 			virtual void PlayerReloadingWeapon(Player&) = 0;

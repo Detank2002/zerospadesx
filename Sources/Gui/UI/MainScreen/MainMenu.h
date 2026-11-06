@@ -82,7 +82,8 @@ namespace spades {
 		 * helper (the server list), and comes back on its own.
 		 */
 		struct MainScreenMainMenuState {
-			int activeTabIndex = 0;
+			/** -1 the home screen; 0 servers, 1 demos, 2 mods. */
+			int activeTabIndex = -1;
 		};
 
 		/** The main menu: server browser, demo browser, mod manager, footer. */
@@ -149,6 +150,22 @@ namespace spades {
 			float modsAuthorColWidth;
 			float modsOfficialColWidth;
 			float modsSizeColWidth;
+
+			// The home screen: a column of big buttons (Training, Multiplayer, ...),
+			// shown first. The tabs and their footer are what Multiplayer, Demos and
+			// Mods open, with Back to here.
+			TabPanel* homePanel = nullptr;
+			ui::Button* trainingButton = nullptr; // says so while the course starts
+			bool trainingStarting = false;
+			/** When the course's server was started, to give up on it in time. */
+			double trainingStartedAt = 0.0;
+			void StartTraining();
+			/** Joins the course once its server listens, or says why it did not. */
+			void PollTraining();
+			ui::SimpleTabStrip* tabStrip = nullptr;
+			std::vector<ui::UIElement*> tabFooter; // weak; shown with the tabs
+			void ShowHome();
+			void ShowTab(int index);
 
 			void OnTabChanged(ui::UIElement& sender);
 			int EnabledIndex(const std::vector<std::string>& enabled, const std::string& name);

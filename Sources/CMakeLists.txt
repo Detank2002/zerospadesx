@@ -1,3 +1,7 @@
+# The training course's server. Before the include_directories() below, so its
+# own target sees only the paths it asks for.
+add_subdirectory(Training)
+
 set(OS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 file(GLOB AUDIO_FILES Audio/*.cpp Audio/*.h)
@@ -6,10 +10,17 @@ set(BINPACK_FILES binpack2d/binpack2d.hpp)
 file(GLOB CLIENT_FILES Client/*.cpp Client/*.h)
 file(GLOB CORE_FILES Core/*.c Core/*.cpp Core/*.h)
 file(GLOB DRAW_FILES Draw/*.cpp Draw/*.h)
-file(GLOB DRAW_GL_FILES Draw/OpenGL/*.cpp Draw/OpenGL/*.h)
+if(USE_OPENGL)
+	file(GLOB DRAW_GL_FILES Draw/OpenGL/*.cpp Draw/OpenGL/*.h)
+else()
+	set(DRAW_GL_FILES)
+endif()
 file(GLOB DRAW_SW_FILES Draw/SW/*.cpp Draw/SW/*.h)
 if(USE_VULKAN)
 	file(GLOB DRAW_VK_FILES Draw/Vulkan/*.cpp Draw/Vulkan/*.h)
+endif()
+if(USE_OPENXR)
+	file(GLOB VR_FILES VR/*.cpp VR/*.h)
 endif()
 file(GLOB ENET_FILES ENet/*.c ENet/*.h)
 file(GLOB ENET_INCLUDE ENet/include/enet/*.h)
@@ -23,10 +34,23 @@ if(NOT USE_VULKAN)
 	file(GLOB GUI_VULKAN_FILES Gui/SDLVulkanDevice.cpp Gui/SDLVulkanDevice.h)
 	list(REMOVE_ITEM GUI_FILES ${GUI_VULKAN_FILES})
 endif()
+# And the OpenGL one, if OpenGL is (Android has no desktop GL; see USE_OPENGL).
+if(NOT USE_OPENGL)
+	file(GLOB GUI_GL_FILES Gui/SDLGLDevice.cpp Gui/SDLGLDevice.h)
+	list(REMOVE_ITEM GUI_FILES ${GUI_GL_FILES})
+endif()
 file(GLOB IMPORTS_FILES Imports/*.h)
 file(GLOB KISS_FILES kiss_fft130/*.c kiss_fft130/*.h)
 file(GLOB JSON_FILES json/*.cpp json/*.h json/*.inl)
 file(GLOB JSON_INCLUDE json/include/json/*.h)
+# The OpenXR loader links jsoncpp itself, and a second, bundled jsoncpp in the
+# same binary is a pile of duplicate symbols. With OpenXR the game uses the
+# loader's jsoncpp (1.9.x still has every class it needs) instead of its own.
+if(USE_OPENXR)
+	find_package(jsoncpp CONFIG REQUIRED)
+	set(JSON_FILES "")
+	set(JSON_INCLUDE "")
+endif()
 file(GLOB SCRIPTBINDING_FILES ScriptBindings/*.cpp ScriptBindings/*.h)
 file(GLOB UNZIP_FILES unzip/*.c unzip/*.h)
 
@@ -55,7 +79,9 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU
 endif()
 
 include_directories(BEFORE ".")
-include_directories(BEFORE "json/include")
+if(NOT USE_OPENXR)
+	include_directories(BEFORE "json/include")
+endif()
 include_directories(BEFORE "ENet/include")
 
 if(WIN32)
@@ -68,12 +94,19 @@ if(WIN32)
 	endif()
 endif()
 
-add_executable(ZeroSpades
+set(ZEROSPADES_SOURCES
 	${AUDIO_FILES} ${AUDIO_AL_FILES} ${BINPACK_FILES} ${CLIENT_FILES}
-	${CORE_FILES} ${PLATFORM_FILES} ${DRAW_FILES} ${DRAW_GL_FILES} ${DRAW_SW_FILES} ${DRAW_VK_FILES} ${ENET_FILES}
+	${CORE_FILES} ${PLATFORM_FILES} ${DRAW_FILES} ${DRAW_GL_FILES} ${DRAW_SW_FILES} ${DRAW_VK_FILES} ${VR_FILES} ${ENET_FILES}
 	${ENET_INCLUDE} ${GUI_FILES} ${GUI_COMPONENTS_FILES} ${GUI_UTILS_FILES} ${GUI_UI_FILES} ${IMPORTS_FILES} ${KISS_FILES}
 	${JSON_FILES} ${JSON_INCLUDE} ${UNZIP_FILES} ${SCRIPTBINDING_FILES}
 	${RESOURCE_FILES})
+if(ANDROID)
+	# An Android app is a library its activity loads: SDL's loads libmain.so.
+	add_library(ZeroSpades SHARED ${ZEROSPADES_SOURCES})
+	target_link_libraries(ZeroSpades android log)
+else()
+	add_executable(ZeroSpades ${ZEROSPADES_SOURCES})
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 	target_compile_options(ZeroSpades PRIVATE
@@ -82,6 +115,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	target_compile_options(ZeroSpades PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wno-sfinae-incomplete>)
+endif()
+if(MSVC)
+	# Visual Studio builds a project's files one at a time without /MP, and
+	# nearly everything is in this one. Most of the cores, not all: the
+	# machine stays usable during a build. ZEROSPADES_MSVC_JOBS changes it.
+	cmake_host_system_information(RESULT _cores QUERY NUMBER_OF_LOGICAL_CORES)
+	math(EXPR _jobs "${_cores} * 3 / 4")
+	if(_jobs LESS 1)
+		set(_jobs 1)
+	endif()
+	set(ZEROSPADES_MSVC_JOBS ${_jobs} CACHE STRING "Files compiled at once by MSVC (/MP)")
+	target_compile_options(ZeroSpades PRIVATE /MP${ZEROSPADES_MSVC_JOBS})
 endif()
 
 set_target_properties(ZeroSpades PROPERTIES
@@ -112,6 +157,9 @@ if(APPLE OR WIN32)
 	# the correct capitalization.
 	# We also want the correct capitalization on Windows.
 	set_target_properties(ZeroSpades PROPERTIES OUTPUT_NAME ZeroSpades)
+elseif(ANDROID)
+	# libmain.so: the library SDL's Android activity loads.
+	set_target_properties(ZeroSpades PROPERTIES OUTPUT_NAME main)
 else()
 	set_target_properties(ZeroSpades PROPERTIES OUTPUT_NAME zerospades)
 endif()
@@ -159,9 +207,11 @@ if(WIN32)
 		endif()
 	endforeach()
 	add_definitions(-DCURL_STATICLIB)
-	get_filename_component(GLEWLIBFILE ${GLEW_LIBRARY} NAME_WE)
-	if("glew32s" STREQUAL ${GLEWLIBFILE})
-		add_definitions(-DGLEW_STATIC)	#static linked
+	if(USE_OPENGL)
+		get_filename_component(GLEWLIBFILE ${GLEW_LIBRARY} NAME_WE)
+		if("glew32s" STREQUAL ${GLEWLIBFILE})
+			add_definitions(-DGLEW_STATIC)	#static linked
+		endif()
 	endif()
 	if(MSVC)
 		#lm: this sucks, msvc fucks up some linking (conflicts)
@@ -183,6 +233,7 @@ source_group("Draw" FILES ${DRAW_FILES})
 source_group("Draw\\OpenGL" FILES ${DRAW_GL_FILES})
 source_group("Draw\\SW" FILES ${DRAW_SW_FILES})
 source_group("Draw\\Vulkan" FILES ${DRAW_VK_FILES})
+source_group("VR" FILES ${VR_FILES})
 source_group("libs\\Enet" FILES ${ENET_FILES})
 source_group("libs\\Enet\\include" FILES ${ENET_INCLUDE})
 source_group("Gui" FILES ${GUI_FILES})
@@ -196,11 +247,12 @@ source_group("libs\\json\\include" FILES ${JSON_INCLUDE})
 source_group("ScriptBindings" FILES ${SCRIPTBINDING_FILES})
 source_group("libs\\unzip" FILES ${UNZIP_FILES})
 
+target_link_libraries(ZeroSpades training_server)
 target_link_libraries(ZeroSpades
 	${SDL2_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${OPENGL_LIBRARIES} ${ZLIB_LIBRARIES}
 	${CURL_LIBRARY} ${FREETYPE_LIBRARIES} ${CMAKE_DL_LIBS} ${ANGELSCRIPT_LIBS}
 	${Ogg_LIBRARY} ${OpusFile_LIBRARY})
-if(NOT APPLE)
+if(USE_OPENGL AND NOT APPLE)
 	target_link_libraries(ZeroSpades ${GLEW_LIBRARY})
 endif()
 
@@ -230,6 +282,10 @@ if(USE_VCPKG)
 	target_link_libraries(ZeroSpades Ogg::ogg Opus::opus)
 endif()
 
+if(USE_OPENXR)
+	target_link_libraries(ZeroSpades OpenXR::openxr_loader JsonCpp::JsonCpp)
+endif()
+
 #todo: MACOSX_BUNDLE_ICON_FILE ?
 
 if(OPENAL_FOUND)
@@ -249,11 +305,12 @@ endif()
 
 if(WIN32)
 	target_link_libraries(ZeroSpades ws2_32.lib winmm.lib)
-elseif(UNIX AND NOT APPLE)
+elseif(UNIX AND NOT APPLE AND NOT ANDROID)
 	target_link_libraries(ZeroSpades Xext)
 endif()
 
-if(UNIX)
+# Android's libc carries what rt and pthread are elsewhere, and has no X.
+if(UNIX AND NOT ANDROID)
 	if(NOT(CMAKE_SYSTEM_NAME MATCHES "BSD" OR APPLE))
 		if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
 			target_link_libraries(ZeroSpades rt)

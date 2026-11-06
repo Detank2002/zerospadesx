@@ -69,8 +69,14 @@ namespace spades {
 			VkPipeline gaussPipeline;
 			VkPipeline upsamplePipeline;
 			VkPipeline compositePipeline;
+			// Multiview twins (both eyes in one pass), made only in multiview.
+			VkRenderPass ppRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline downsamplePipelineMV = VK_NULL_HANDLE;
+			VkPipeline gaussPipelineMV = VK_NULL_HANDLE;
+			VkPipeline upsamplePipelineMV = VK_NULL_HANDLE;
+			VkPipeline compositePipelineMV = VK_NULL_HANDLE;
 
-			static constexpr int MAX_FRAME_SLOTS = MaxFramesInFlight;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 
@@ -103,7 +109,8 @@ namespace spades {
 			void DrawFullscreen(VkCommandBuffer cmd, VkRenderPass rp, VkFramebuffer fb,
 			                    uint32_t width, uint32_t height,
 			                    VkPipeline pipeline, VkPipelineLayout layout,
-			                    VkDescriptorSet ds);
+			                    VkDescriptorSet ds, const void* pushData = nullptr,
+			                    uint32_t pushSize = 0);
 
 			void CreatePipeline() override {}
 			void CreateRenderPass() override {}
@@ -114,6 +121,8 @@ namespace spades {
 
 			void Filter(VkCommandBuffer cmd,
 			            VulkanImage* input, VulkanImage* output) override;
+
+			bool SupportsLayers() const override { return compositePipelineMV != VK_NULL_HANDLE; }
 		};
 
 	} // namespace draw

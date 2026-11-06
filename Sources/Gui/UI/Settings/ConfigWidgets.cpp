@@ -319,5 +319,35 @@ namespace spades {
 			cfgY = presetY;
 			cfgZ = presetZ;
 		}
+
+		// -- QualityPresetButton --
+
+		QualityPresetButton::QualityPresetButton(ui::UIManager* manager,
+		                                         const std::string& caption,
+		                                         const std::string& groupName,
+		                                         QualityPreset preset)
+		    : ConfigToggleButtonBase(manager, caption), preset(std::move(preset)) {
+			this->groupName = groupName;
+		}
+
+		bool QualityPresetButton::IsSelected() { return MatchesQualityPreset(preset); }
+		void QualityPresetButton::SetValue() { ApplyQualityPreset(preset); }
+
+		// -- QualityPresetCustomButton --
+
+		QualityPresetCustomButton::QualityPresetCustomButton(ui::UIManager* manager,
+		                                                     const std::string& caption,
+		                                                     const std::string& groupName,
+		                                                     std::vector<QualityPreset> presets)
+		    : ConfigToggleButtonBase(manager, caption), presets(std::move(presets)) {
+			this->groupName = groupName;
+		}
+
+		bool QualityPresetCustomButton::IsSelected() {
+			for (const QualityPreset& p : presets)
+				if (MatchesQualityPreset(p))
+					return false;
+			return true;
+		}
 	} // namespace gui
 } // namespace spades

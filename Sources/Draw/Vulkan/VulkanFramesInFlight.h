@@ -29,5 +29,15 @@ namespace spades {
 		 * are sized from.
 		 */
 		constexpr int MaxFramesInFlight = 2;
+
+		/**
+		 * The slots the post filters keep their per-frame descriptor pools and
+		 * framebuffers in, as `VulkanRenderer::GetCurrentFrameIndex` numbers
+		 * them: a frame in flight's on a monitor; in a headset each eye's pass
+		 * and the scope view's are frames of their own (VulkanRendererVR.cpp),
+		 * on slots 0, 1 and 2.
+		 */
+		constexpr int MaxFrameSlots = 3;
+		static_assert(MaxFrameSlots >= MaxFramesInFlight, "a frame in flight needs its own slot");
 	} // namespace draw
 } // namespace spades

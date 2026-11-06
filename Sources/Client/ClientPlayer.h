@@ -21,6 +21,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 
 #include "Flashlight.h"
 #include "FlashlightGlare.h"
@@ -37,6 +38,7 @@ namespace spades {
 		class IRenderer;
 		class IAudioDevice;
 		class SandboxedRenderer;
+		struct ModelRenderParam;
 
 		// TODO: Use `shared_ptr` instead of `RefCountedObject`
 		/** Representation of player which is used by
@@ -83,6 +85,9 @@ namespace spades {
 			asIScriptObject* blockViewSkin;
 			asIScriptObject* weaponViewSkin;
 			asIScriptObject* grenadeViewSkin;
+
+			// ScriptManager::GetGeneration() of the module the skins come from.
+			std::uint64_t skinScriptGeneration;
 
 			asIScriptObject* GetCurrentSkin(bool viewSkin);
 
@@ -133,6 +138,47 @@ namespace spades {
 			void AddToSceneThirdPersonView();
 			void AddToSceneFirstPersonView();
 
+			// VR. The local player in a headset sees their tracked hands holding the
+			// tool; everyone else sees a VR player's tracked head and hands on the
+			// ordinary body. Both draw the tool with its third-person skin, moved
+			// from the shoulder into the hand, so tracers, muzzle flash and casings
+			// come out of the gun actually being held.
+			bool IsVRHandsView();
+			void AddToSceneVRHands();
+			/** Where the held gun's sights are, from its skin (IVRWeaponSkin):
+			 * `valid` false for a skin that does not say. */
+			struct VRGunSights {
+				bool valid = false;
+				Vector3 rear, front;   // the iron sights' line
+				Vector3 reflexCenter;  // the reflex sight's window
+				float reflexRadius = 0.0F; // 0: no reflex sight
+			};
+			VRGunSights GetVRGunSights(const Vector3& handPos, const Vector3 axes[3]);
+			/** The gun's frame from VRToolOriginMatrix: x right, y back, z down,
+			 * from the grip (the laser's, the old scope tube's). */
+			static Matrix4 VRGunFrameOffset();
+			/** The sights of a skin that does not give them (IVRWeaponSkin), found
+			 * from the models it drew (`drawn`, by file) in the gun's frame. */
+			struct FittedSights {
+				std::string key; // the files it was found from
+				WeaponType weapon = RIFLE_WEAPON;
+				bool valid = false;
+				Vector3 rear, front; // in the gun's frame
+			};
+			FittedSights fittedSights;
+			void FitVRSights(const std::vector<std::pair<std::string, Matrix4>>& drawn,
+			                 const Matrix4& toolOrigin);
+			/** Your own torso and legs in a headset (vr_showBody). */
+			void AddVRLocalBody(const ModelRenderParam& param);
+			/** Arms from shoulders beside the head to each tracked hand, the tool in
+			 * `toolHand`, and the head itself when `drawHead`. Axes are forward,
+			 * right, down. */
+			void AddVRBody(const Vector3& headPos, const Vector3 headAxes[3], const bool handValid[2],
+			               const Vector3 handPos[2], const Vector3 handAxes[2][3], int toolHand,
+			               bool drawHead, bool drawUpperArms, const ModelRenderParam& param);
+			/** The OriginMatrix that puts the current tool's grip in a hand. */
+			Matrix4 VRToolOriginMatrix(const Vector3& handPos, const Vector3 axes[3]);
+
 			void SetSkinParameterForTool(Player::ToolType, asIScriptObject*);
 			void SetCommonSkinParameter(asIScriptObject*);
 
@@ -149,6 +195,16 @@ namespace spades {
 		public:
 			ClientPlayer(Player& p, Client&);
 			Player& GetPlayer() const { return player; }
+
+			/** Where a gun's laser leaves it, the top of the barrel, for a hand at
+			 * `handPos` with `axes` (Client::GetLocalVRHand). The shot's
+			 * through-the-wall guard measures to it too (Client::VRGunShot). */
+			Vector3 VRGunLaserOrigin(const Vector3& handPos, const Vector3 axes[3]);
+
+			/** False once the skin scripts were reloaded: the skins are then rebuilt. */
+			bool HasCurrentSkins() const {
+				return skinScriptGeneration == ScriptManager::GetInstance()->GetGeneration();
+			}
 
 			void Update(float dt);
 			void AddToScene();
@@ -204,6 +260,8 @@ namespace spades {
 			Vector3 GetCaseEjectPositionInFirstPersonView();
 
 			Matrix4 GetEyeMatrix();
+			/** The file a body part is drawn from: the usual one, or the server's model set's. */
+			std::string ModelPart(const std::string& modelPath, const std::string& part);
 		};
 	} // namespace client
 } // namespace spades

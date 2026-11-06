@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <set>
+#include <utility>
 
 #include "CellToTriangle.h"
 #include "GLDynamicLightShader.h"
@@ -111,6 +112,18 @@ namespace spades {
 
 			device.DeleteBuffer(idxBuffer);
 			device.DeleteBuffer(buffer);
+		}
+
+		void GLOptimizedVoxelModel::Replace(GLOptimizedVoxelModel& other) {
+			SPADES_MARK_FUNCTION();
+			std::swap(image, other.image);
+			std::swap(buffer, other.buffer);
+			std::swap(idxBuffer, other.idxBuffer);
+			std::swap(numIndices, other.numIndices);
+			std::swap(origin, other.origin);
+			std::swap(radius, other.radius);
+			std::swap(dimensions, other.dimensions);
+			std::swap(boundingBox, other.boundingBox);
 		}
 
 		void GLOptimizedVoxelModel::GenerateTexture() {

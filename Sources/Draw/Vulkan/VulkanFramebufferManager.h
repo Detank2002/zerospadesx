@@ -98,6 +98,7 @@ namespace spades {
 			// single-sample *Resolve images below before post-processing.
 			VkSampleCountFlagBits sampleCount;
 			bool useMSAA;
+			bool resolveInPass = false;
 			// Whether the 1x depth copies hold the depth as it is now: set by a
 			// copy, cleared by `InvalidateDepthSamples`
 			bool sceneDepthSampleCurrent = false;
@@ -116,6 +117,15 @@ namespace spades {
 			Handle<VulkanImage> mirrorDepthSampleImage;
 			// What the copies into those pass through, at 1x
 			Handle<VulkanBuffer> depthCopyBuffer;
+
+			// Foveated rendering (vr_foveation): the density each part of the
+			// scene's targets is shaded at, a layer an eye, attached to every scene
+			// render pass; its contents go up on the first frame
+			// (RecordDensityMapUpload). Null without foveation.
+			Handle<VulkanImage> densityMapImage;
+			Handle<VulkanBuffer> densityMapUpload;
+			bool densityMapUploaded = false;
+			void CreateDensityMap(int foveation);
 
 			// Single-sample resolve targets for the scene attachments. Only created
 			// when useMSAA; the post-process chain and any code that *reads* the
@@ -144,6 +154,12 @@ namespace spades {
 			Handle<VulkanImage> screenCopyDepthImage;
 
 			// Render pass used for all framebuffers
+			uint32_t viewCount = 1;
+			// Multiview: one eye's picture and depth, copied out for the post chain.
+			Handle<VulkanImage> postColorImage;
+			Handle<VulkanImage> postDepthImage;
+			int extractedView = -1;
+
 			VkRenderPass renderPass;
 			// The scene pass continuing what is in its targets: colour, depth and
 			// stencil loaded from where the scene's pass left them. Compatible with
@@ -169,9 +185,13 @@ namespace spades {
 			static constexpr VkFormat kSampledStencilFormat = VK_FORMAT_R8_UINT;
 
 			/** Makes the targets, sized and formatted from the renderer's latched
-			 * `settings` */
+			 * `settings`. `viewCount` 2: multiview (vr_multiview). The scene's
+			 * targets get a layer per eye and its render passes draw both at once;
+			 * after the scene, ExtractView copies one eye out into single-layer
+			 * images for the post-process chain. */
 			VulkanFramebufferManager(Handle<gui::SDLVulkanDevice> device, VulkanSettings& settings,
-			                         int renderWidth, int renderHeight);
+			                         int renderWidth, int renderHeight, int viewCount = 1,
+			                         int foveation = 0, bool resolveInPass = false);
 			~VulkanFramebufferManager();
 
 			/** Sets up for scene rendering. */
@@ -191,9 +211,13 @@ namespace spades {
 			// (post-process, water screen copy, framebuffer readback). Identical to
 			// GetColorImage()/GetDepthImage() when MSAA is off.
 			Handle<VulkanImage> GetResolvedColorImage() {
+				if (extractedView >= 0)
+					return postColorImage;
 				return useMSAA ? renderColorResolveImage : renderColorImage;
 			}
 			Handle<VulkanImage> GetResolvedDepthImage() {
+				if (extractedView >= 0)
+					return postDepthImage;
 				return useMSAA ? renderDepthResolveImage : sceneDepthSampleImage;
 			}
 			/** The scene's stencil as a single-sample R8_UINT image, read in
@@ -203,11 +227,29 @@ namespace spades {
 			Handle<VulkanImage> GetResolvedStencilImage() {
 				return useMSAA ? renderStencilResolveImage : sceneStencilSampleImage;
 			}
+			/** The view of GetResolvedStencilImage a filter reads: under ExtractView,
+			 * the extracted eye's layer alone. */
+			VkImageView GetResolvedStencilView();
+			int GetViewCount() const { return static_cast<int>(viewCount); }
+			/** Multiview: copy eye `view`'s colour and sampled depth out of the
+			 * layered scene, and answer GetResolved* with the copies until
+			 * EndExtractedView. Both scene images must be in SHADER_READ_ONLY
+			 * (they are after the scene's last pass); so are the copies after. */
+			void ExtractView(VkCommandBuffer commandBuffer, int view, bool withColor = true);
+			void EndExtractedView() { extractedView = -1; }
 			bool IsMSAA() const { return useMSAA; }
+			/** The scene pass resolves its colour itself and keeps no depth
+			 * (VulkanRenderer::SceneResolvesInPass): there is no resolved depth or
+			 * stencil, and ResolveScene only makes the pass's resolve visible. */
+			bool ResolvesInPass() const { return resolveInPass; }
 			/** Tells the depth copies below the depth may have changed since they
 			 * last ran (a new frame, or a draw writing depth after the pre-pass),
 			 * so that each copies again; until then a repeated copy is skipped */
 			void InvalidateDepthSamples();
+			/** Foveation: puts the density map's contents into it, the first time.
+			 * Called before the frame's first scene render pass. */
+			void RecordDensityMapUpload(VkCommandBuffer commandBuffer);
+			bool IsFoveated() const { return densityMapImage; }
 
 			// Depth in/out: ATTACHMENT_OPTIMAL; copy ends SHADER_READ_ONLY. No-op under MSAA.
 			void CopySceneDepthForSampling(VkCommandBuffer commandBuffer);

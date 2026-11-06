@@ -68,10 +68,14 @@ namespace spades {
 			                          //           the scene pass.
 			                          //           z = zNear, w = zFar
 			float fogColorDist[4];    // [80..95] xyz = fogColor (linear), w = fogDistance
+			float fovEdges[4];        // [96..111] the view-ray tangents at the
+			                          //           texture's edges: x = left,
+			                          //           y = right, z = row 0 (top),
+			                          //           w = the last row (bottom)
 		};
 		static_assert(sizeof(FogClassicPushConstants) <= kPortablePushConstantsSize,
 		              "push constants must fit the 128 bytes every device has (VulkanPushConstants.h)");
-		static_assert(sizeof(FogClassicPushConstants) == 96, "FogClassicPushConstants must be 96 bytes");
+		static_assert(sizeof(FogClassicPushConstants) == 112, "FogClassicPushConstants must be 112 bytes");
 
 		// ─────────────────────────────────────────────────────────────────────────
 		//  Construction / destruction
@@ -547,6 +551,15 @@ namespace spades {
 				pc1.fovZNearFar[1] = -tanf(def.fovY * 0.5F);
 				pc1.fovZNearFar[2] = def.zNear;
 				pc1.fovZNearFar[3] = def.zFar;
+				{
+					// The texture's row 0 is the top of the view (the scene pass's
+					// negative-height viewport), hence up first.
+					const client::FovTangents f = def.GetFovTangents();
+					pc1.fovEdges[0] = f.left;
+					pc1.fovEdges[1] = f.right;
+					pc1.fovEdges[2] = f.up;
+					pc1.fovEdges[3] = f.down;
+				}
 
 				pc1.fogColorDist[0] = fogCol.x;
 				pc1.fogColorDist[1] = fogCol.y;

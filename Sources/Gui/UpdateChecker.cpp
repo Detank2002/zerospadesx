@@ -19,6 +19,7 @@
  */
 
 #include "UpdateChecker.h"
+#include "CurlTls.h"
 
 #include <cctype>
 #include <memory>
@@ -36,17 +37,17 @@ namespace spades {
 			// Only published, non-prerelease releases are returned here, so a
 			// draft or a release candidate never triggers the notice.
 			constexpr const char* kLatestReleaseUrl =
-			  "https://api.github.com/repos/zerospades/zerospades/releases/latest";
+			  "https://api.github.com/repos/Detank2002/zerospadesx/releases/latest";
 
 			// Every link the check hands to the browser must start with this; the
 			// response is untrusted, and the link ends up in a shell open call.
 			constexpr const char* kReleasesPageUrl =
-			  "https://github.com/zerospades/zerospades/releases/";
+			  "https://github.com/Detank2002/zerospadesx/releases/";
 
 			// A release's page is this followed by its tag. Used only when the
 			// response carries no acceptable page link of its own.
 			constexpr const char* kReleaseTagPageUrl =
-			  "https://github.com/zerospades/zerospades/releases/tag/";
+			  "https://github.com/Detank2002/zerospadesx/releases/tag/";
 
 			/**
 			 * True if `url` is one of the project's release pages, with a path made
@@ -148,6 +149,7 @@ namespace spades {
 
 				size_t (*writeCallback)(void*, size_t, size_t, Query*) = &Query::Write;
 				curl_easy_setopt(handle.get(), CURLOPT_URL, kLatestReleaseUrl);
+				SetupCurlTls(handle.get());
 				curl_easy_setopt(handle.get(), CURLOPT_USERAGENT, PACKAGE_STRING);
 				curl_easy_setopt(handle.get(), CURLOPT_HTTPHEADER, headers.get());
 				curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, writeCallback);

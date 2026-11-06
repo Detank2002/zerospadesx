@@ -27,6 +27,8 @@
 #include <Core/Bitmap.h>
 #include <Core/Debug.h>
 #include <Core/Exception.h>
+#include <Core/FileManager.h>
+#include <Core/ResourceChanges.h>
 
 namespace spades {
 	namespace draw {
@@ -193,6 +195,23 @@ namespace spades {
 			} catch (const std::exception& ex) {
 				SPLog("Failed to create Vulkan image '%s': %s", name.c_str(), ex.what());
 				return Handle<client::IImage>();
+			}
+		}
+
+		void VulkanImageManager::ReloadResources(const ResourceChanges& changes) {
+			SPADES_MARK_FUNCTION();
+
+			for (const auto& entry : images) {
+				// Gone with a disabled mod: keep what is loaded.
+				if (!changes.Contains(entry.first) ||
+				    !FileManager::FileExists(entry.first.c_str()))
+					continue;
+				// CreateImage logs a failure; the old image is kept then.
+				Handle<client::IImage> fresh = CreateImage(entry.first);
+				if (!fresh)
+					continue;
+				static_cast<VulkanImageWrapper&>(*entry.second)
+				  .Replace(static_cast<VulkanImageWrapper&>(*fresh));
 			}
 		}
 

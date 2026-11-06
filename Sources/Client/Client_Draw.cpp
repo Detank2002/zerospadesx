@@ -19,8 +19,10 @@
 
  */
 
+#include <Training/TrainingCourse.h>
 #include <algorithm>
 #include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -60,8 +62,13 @@
 #include "World.h"
 
 #include "NetClient.h"
+#include "VRState.h"
 
 DEFINE_SPADES_SETTING(cg_hitIndicator, "1");
+SPADES_SETTING(vr_wristHud);
+SPADES_SETTING(cg_reflexScope);
+SPADES_SETTING(vr_showFps);
+SPADES_SETTING(vr_heldMap);
 DEFINE_SPADES_SETTING(cg_debugAim, "0");
 SPADES_SETTING(cg_keyReloadWeapon);
 SPADES_SETTING(cg_keyJump);
@@ -107,6 +114,8 @@ DEFINE_SPADES_SETTING(cg_debugHitTestFadeTime, "10");
 // Damage Markers extension every number comes from the server, which does not say
 // what dealt the damage, so any non-zero value shows them all, melee included.
 DEFINE_SPADES_SETTING(cg_damageIndicators, "1");
+SPADES_SETTING(vr_reloadGesture);
+SPADES_SETTING(vr_toolButtons);
 DEFINE_SPADES_SETTING(cg_hurtScreenEffects, "1");
 DEFINE_SPADES_SETTING(cg_healScreenEffects, "1");
 
@@ -1170,8 +1179,12 @@ namespace spades {
 
 			// Sized against the screen height, like the chevron, and kept inside a
 			// margin so a ping just off the edge still tells you which way to look.
+			// (In an eye, well inside its picture: the edges of an eye's image are
+			// past what that eye's lens shows.)
 			float sz = Clamp(sh * 0.014F, 10.0F, 26.0F);
 			float margin = sz * 2.0F;
+			if (vrEyeOverlayPass)
+				margin = std::max(margin, std::min(sw, sh) * 0.22F);
 
 			// What is left of a marker the player is facing: enough to keep the callout
 			// on screen without hiding what it points at. Down the sights it thins
@@ -1366,6 +1379,10 @@ namespace spades {
 		void Client::UpdateDamageIndicators(float dt) {
 			for (auto it = damageIndicators.begin(); it != damageIndicators.end();) {
 				DamageIndicator& ent = *it;
+				if (time < ent.showAt) {
+					++it;
+					continue;
+				}
 				ent.fade -= dt;
 				if (ent.fade < 0) {
 					std::list<DamageIndicator>::iterator tmp = it++;
@@ -1378,6 +1395,15 @@ namespace spades {
 				++it;
 			}
 		}
+		float Client::DamageIndicatorDelay() {
+			// A hit is only shown once the server could have refused it: two
+			// players firing at once, the one who dies first sent a hit that the
+			// server drops, and its number was already up (a tester's report).
+			// About a round trip; the death arrives within it.
+			const int ping = activeNet ? activeNet->GetPing() : 0;
+			return Clamp(static_cast<float>(ping) / 1000.0F + 0.05F, 0.05F, 0.5F);
+		}
+
 		void Client::DrawDamageIndicators() {
 			SPADES_MARK_FUNCTION();
 
@@ -1385,6 +1411,8 @@ namespace spades {
 			IFont& guiFont = fontManager->GetGuiFont();
 
 			for (const auto& dmg : damageIndicators) {
+				if (time < dmg.showAt)
+					continue;
 				float fade = dmg.fade;
 				if (fade > 1.0F)
 					fade = 1.0F;
@@ -1396,10 +1424,17 @@ namespace spades {
 
 					// A negative amount is a heal, shown as a gain.
 					int damage = dmg.damage;
-					bool heal = damage < 0;
+					const bool heal = damage < 0;
 					auto damageStr = heal ? "+" + ToString(-damage) : ToString(damage);
-					Vector2 size = font.Measure(damageStr);
+					// In a headset the number sat on the target, which is small at
+					// range and has to stay in view while shooting (a tester's
+					// report): smaller, and beside it, above and to the right.
+					const bool vr = IsVRActive();
+					const float scale = vr ? 0.7F : 1.0F;
+					Vector2 size = font.Measure(damageStr) * scale;
 					scrPos -= size * 0.5F;
+					if (vr)
+						scrPos += MakeVector2(size.x * 1.2F + 10.0F, -size.y * 1.5F - 6.0F);
 
 					// rounded for better pixel alignment
 					scrPos.x = floorf(scrPos.x);
@@ -1408,6 +1443,8 @@ namespace spades {
 					float per = Clamp(damage / 100.0F, 0.0F, 1.0F);
 					Vector4 shadow = MakeVector4(0, 0, 0, 0.4F * fade);
 					Vector4 color = MakeVector4(1.0F, 1.0F - per, 0.0F, fade);
+					if (heal)
+						color = MakeVector4(0.3F, 1.0F, 0.4F, fade);
 
 					if (heal) {
 						color = MakeVector4(0.3F, 1.0F, 0.3F, fade);
@@ -1416,8 +1453,8 @@ namespace spades {
 						color = MakeVector4(1.0F, pulse * 0.8F, pulse * 0.2F, fade);
 					}
 
-					font.DrawShadow(damageStr, scrPos + MakeVector2(1, 1), 1.0F, shadow, shadow);
-					font.Draw(damageStr, scrPos, 1.0F, color);
+					font.DrawShadow(damageStr, scrPos + MakeVector2(1, 1), scale, shadow, shadow);
+					font.Draw(damageStr, scrPos, scale, color);
 				}
 			}
 		}
@@ -1811,8 +1848,9 @@ namespace spades {
 				default: SPInvalidEnum("p.GetTool()", curToolType);
 			}
 
-			// draw hitmarks
-			if (cg_hitIndicator && hitFeedbackIconState > 0.0F) {
+			// draw hitmarks (not in a headset: the middle of the view is not where
+			// the gun in your hand points, and the controller rumbles instead)
+			if (cg_hitIndicator && hitFeedbackIconState > 0.0F && !IsVRFrameActive()) {
 				Handle<IImage> img = renderer->RegisterImage("Gfx/HitFeedback.png");
 				Vector2 size = {img->GetWidth(), img->GetHeight()};
 
@@ -1824,15 +1862,19 @@ namespace spades {
 				renderer->DrawImage(img, (MakeVector2(sw, sh) - size) * 0.5F);
 			}
 
-			// draw damage rings
-			hurtRingView->Draw();
+			// draw damage rings (on the wrist they would point the wrong way: the
+			// front panel draws them instead)
+			if (!vrWristPass)
+				hurtRingView->Draw();
 
-			// draw color palette
-			if (curToolType == Player::ToolBlock)
+			// draw color palette (not on the wrist, nor the hotbar below: what a
+			// glance at the watch is for is health and ammo, testers)
+			if (curToolType == Player::ToolBlock && !vrWristPass)
 				paletteView->Draw();
 
 			// draw hotbar when unable to use tool
-			if (cg_hudHotbar && (!CanLocalPlayerUseTool() || (isToolWeapon && isReloading))) {
+			if (cg_hudHotbar && !vrWristPass &&
+			    (!CanLocalPlayerUseTool() || (isToolWeapon && isReloading))) {
 				IFont& font = fontManager->GetSmallFont();
 
 				// register tool icons
@@ -1955,12 +1997,20 @@ namespace spades {
 					msg = _Tr("Client", "Press [{0}] to Reload", TrKey(cg_keyReloadWeapon));
 				}
 
-				if (!msg.empty()) {
+				// (Not on the wrist: the watch says "Reloading", and the prompt
+				// names a keyboard key)
+				if (!msg.empty() && !vrWristPass) {
 					IFont& font = fontManager->GetGuiFont();
 					Vector2 size = font.Measure(msg);
 					Vector2 pos = MakeVector2((sw - size.x) * 0.5F, sh * (2.0F / 3.0F));
 					font.DrawShadow(msg, pos, 1.0F, white, MakeVector4(0, 0, 0, 0.5F));
 				}
+			}
+
+			// On the wrist: a watch's face instead of the corner numbers.
+			if (vrWristPass) {
+				DrawVRWatch(p, clipNum, stockNum, clipSize, isToolWeapon, isReloading);
+				return;
 			}
 
 			// draw remaining ammo counter
@@ -2110,7 +2160,8 @@ namespace spades {
 			Vector4 color = MakeVector4(1, 1, 1, 1);
 			Vector4 shadowColor = MakeVector4(0, 0, 0, 0.5F);
 
-			IFont& font = fontManager->GetGuiFont();
+			// Large on the wrist, where nothing should be small (testers)
+			IFont& font = vrWristPass ? fontManager->GetLargeFont() : fontManager->GetGuiFont();
 			Vector2 size = font.Measure(msg);
 			Vector2 pos = MakeVector2((sw - size.x) * 0.5F, sh / 2.5F);
 			font.DrawShadow(msg, pos, 1.0F, color, shadowColor);
@@ -2139,7 +2190,9 @@ namespace spades {
 		void Client::DrawSpectateHUD() {
 			SPADES_MARK_FUNCTION();
 
-			IFont& font = fontManager->GetGuiFont();
+			// On the wrist: larger, and without the lines naming keyboard keys
+			IFont& font = vrWristPass ? fontManager->GetMediumFont() : fontManager->GetGuiFont();
+			const bool keyHelp = !vrWristPass;
 
 			float sw = renderer->ScreenWidth();
 			float sh = renderer->ScreenHeight();
@@ -2165,7 +2218,7 @@ namespace spades {
 			Vector4 color = MakeVector4(1, 1, 1, 1);
 			Vector4 shadow = MakeVector4(0, 0, 0, 0.7F);
 
-			float lh = 20.0F;
+			float lh = vrWristPass ? 30.0F : 20.0F;
 			auto addLine = [&](const std::string& text) {
 				Vector2 pos = MakeVector2(x, y);
 				pos.x -= font.Measure(text).x;
@@ -2190,17 +2243,22 @@ namespace spades {
 
 					y += lh * 0.5F;
 
-					if (camTarget.IsAlive())
-						addLine(_Tr("Client", "[{0}] Cycle camera mode", TrKey(cg_keyJump)));
-					addLine(_Tr("Client", "[{0}/{1}] Next/Prev player",
-						TrKey(cg_keyAttack), TrKey(cg_keyAltAttack)));
-					if (isSpectating)
-						addLine(_Tr("Client", "[{0}] Unfollow", TrKey(cg_keyReloadWeapon)));
+					if (keyHelp) {
+						if (camTarget.IsAlive())
+							addLine(_Tr("Client", "[{0}] Cycle camera mode", TrKey(cg_keyJump)));
+						addLine(_Tr("Client", "[{0}/{1}] Next/Prev player",
+							TrKey(cg_keyAttack), TrKey(cg_keyAltAttack)));
+						if (isSpectating)
+							addLine(_Tr("Client", "[{0}] Unfollow", TrKey(cg_keyReloadWeapon)));
+					}
 				}
-			} else {
+			} else if (keyHelp) {
 				addLine(_Tr("Client", "[{0}/{1}] Follow a player",
 					TrKey(cg_keyAttack), TrKey(cg_keyAltAttack)));
 			}
+
+			if (!keyHelp)
+				return;
 
 			if (cameraMode == ClientCameraMode::Free) {
 				addLine(_Tr("Client", "[{0}/{1}] Go up/down",
@@ -2482,6 +2540,554 @@ namespace spades {
 			}
 		}
 
+		bool Client::IsOnTrainingCourse() {
+			GameMap* m = map.GetPointerOrNull();
+			if (m != trainingCheckedMap) {
+				trainingCheckedMap = m;
+				trainingCourse = false;
+				if (m && m->IsSolid(training::kMarkerX, training::kMarkerY, training::kMarkerZ)) {
+					// The marker's colour, in whichever byte order the map keeps.
+					const uint32_t c = m->GetColor(training::kMarkerX, training::kMarkerY,
+					                               training::kMarkerZ) & 0xFFFFFFu;
+					const uint32_t rgb = training::kMarkerRGB;
+					const uint32_t bgr =
+					  ((rgb & 0xFFu) << 16) | (rgb & 0xFF00u) | ((rgb >> 16) & 0xFFu);
+					trainingCourse = c == rgb || c == bgr;
+				}
+			}
+			return trainingCourse;
+		}
+
+		bool Client::TrainingTip(bool vr, std::string& title, std::string& tip) {
+			if (!world || !IsOnTrainingCourse())
+				return false;
+			stmp::optional<Player&> p = world->GetLocalPlayer();
+			if (!p || !p->IsAlive() || p->IsSpectator())
+				return false;
+			const training::Station st = training::station_at(p->GetPosition().x);
+			const std::string spade = static_cast<std::string>(cg_keyToolSpade),
+			                  block = static_cast<std::string>(cg_keyToolBlock),
+			                  gun = static_cast<std::string>(cg_keyToolWeapon),
+			                  nade = static_cast<std::string>(cg_keyToolGrenade);
+			char step[32];
+			std::snprintf(step, sizeof(step), "%d / %d", (int)st + 1, (int)training::StationCount);
+			// The headset's names for things, for whichever hand holds the gun
+			// (vr_leftHanded): a right-handed player's gun hand has A and B, the
+			// other hand X and Y.
+			const bool rightGun = VRToolHand() == VRHandRight;
+			const std::string gunSide = rightGun ? _Tr("Client", "right") : _Tr("Client", "left");
+			const std::string otherSide = rightGun ? _Tr("Client", "left") : _Tr("Client", "right");
+			const std::string jumpBtn = rightGun ? "A" : "X", reloadBtn = rightGun ? "B" : "Y";
+			const std::string colourBtn = rightGun ? "X" : "A", mapBtn = rightGun ? "Y" : "B";
+			const std::string cycle = rightGun ? "X / Y" : "A / B";
+			// With vr_toolButtons the other hand's buttons step through the tools.
+			const std::string orStep =
+			  (int)vr_toolButtons ? _Tr("Client", " (or step to it with {0})", cycle) : std::string();
+			switch (st) {
+				case training::Start:
+					title = _Tr("Client", "Training {0}: the start", std::string(step));
+					tip = vr ? _Tr("Client", "Turn your {0} wrist towards you: health, ammo and the "
+					                         "map are on it. Walk with the {0} stick (click it in to "
+					                         "sprint) and turn with the {1} one. {2} jumps; clicking "
+					                         "the {1} stick in crouches. Walk ahead to the range.",
+					               otherSide, gunSide, jumpBtn)
+					         : _Tr("Client", "Walk ahead to the range. Health and ammo are at the "
+					                         "bottom of the screen.");
+					break;
+				case training::Range:
+					title = _Tr("Client", "Training {0}: the range", std::string(step));
+					if (!vr) {
+						tip = _Tr("Client", "Shoot the targets walking across the range (left "
+						                    "click; right click aims). A shot lands the moment you "
+						                    "fire, so aim right at them. They do not shoot back. "
+						                    "Crouching halves the spread. {0} reloads. Walk on when "
+						                    "you are ready.",
+						          static_cast<std::string>(cg_keyReloadWeapon));
+					} else {
+						const std::string reload =
+						  (int)vr_reloadGesture
+						    ? _Tr("Client", "To reload, press {0} to drop the magazine, take a new "
+						                    "one from your belt with your {1} hand and put it in "
+						                    "under the gun.",
+						          reloadBtn, otherSide)
+						    : _Tr("Client", "{0} reloads: the laser stays amber until it is done, "
+						                    "and the gun buzzes in your hand.",
+						          reloadBtn);
+						tip = _Tr("Client", "Your gun is over your {0} shoulder: reach up there and "
+						                    "squeeze the grip{1}. Shoot the targets walking across "
+						                    "the range: the laser's dot is where the shot lands, the "
+						                    "moment you fire. Crouching halves the spread. {2} They "
+						                    "do not shoot back. Walk on when you are ready.",
+						          gunSide, orStep, reload);
+					}
+					break;
+				case training::Dig:
+					title = _Tr("Client", "Training {0}: dig", std::string(step));
+					tip = vr ? _Tr("Client", "A wall. Take the spade from over your {0} shoulder "
+					                         "(squeeze the grip there){1}. Pull the trigger or swing "
+					                         "it to dig a block, or squeeze the grip to dig a tunnel "
+					                         "your size. The laser's dot turns green when a block is "
+					                         "in reach.",
+					               otherSide, orStep)
+					         : _Tr("Client", "A wall. Take the spade ({0}) and dig through it: right "
+					                         "click digs a tunnel your size.",
+					               spade);
+					break;
+				case training::Build:
+					title = _Tr("Client", "Training {0}: build", std::string(step));
+					tip = vr ? _Tr("Client", "Too high to jump. Take blocks from your {0} hip{1} and "
+					                         "build steps up: point where a block should go and pull "
+					                         "the trigger, or squeeze the grip and drag to lay a "
+					                         "line. The wrist menu has a palette.{2}",
+					               gunSide, orStep,
+					               (int)vr_toolButtons
+					                 ? std::string()
+					                 : _Tr("Client", " {0} copies the colour of the block you point at.",
+					                       colourBtn))
+					         : _Tr("Client", "Too high to jump. Take blocks ({0}) and build steps up: "
+					                         "left click places a block where you look.",
+					               block);
+					break;
+				case training::Grenade:
+					title = _Tr("Client", "Training {0}: blow it open", std::string(step));
+					tip = vr ? _Tr("Client", "The tunnel is plugged. Take a grenade from your {0} "
+					                         "hip{1}, hold the trigger to cook it and throw it at the "
+					                         "plug, letting go as you throw. Stand back.",
+					               otherSide, orStep)
+					         : _Tr("Client", "The tunnel is plugged. Take a grenade ({0}), hold left "
+					                         "click to cook it and let go to throw it at the plug. "
+					                         "Stand back.",
+					               nade);
+					break;
+				default:
+					title = _Tr("Client", "Training {0}: done", std::string(step));
+					tip = vr ? _Tr("Client", "You made it. {1} opens and closes the big map, and your "
+					                         "{0} grip shows the scores. With a gun, hold your {0} "
+					                         "trigger to brace it on your shoulder. Bring your {2} "
+					                         "hand to your {0} wrist for the wrist menu: chat, quick "
+					                         "messages, colours, the light, and Menu, to leave. Hold "
+					                         "both sticks in to recentre.",
+					               otherSide,
+					               (int)vr_toolButtons
+					                 ? _Tr("Client", "Your {0} trigger (without a gun)", otherSide)
+					                 : mapBtn,
+					               gunSide)
+					         : _Tr("Client", "You made it. Your gun is {0}. Press Esc to leave when "
+					                         "you are ready.",
+					               gun);
+					break;
+			}
+			return true;
+		}
+
+		void Client::DrawTipBox(const std::string& title, const std::string& text, Vector4 accent,
+		                        Vector2 at, float layoutW, float k) {
+			IFont& font = fontManager->GetGuiFont();
+			const float inner = layoutW - 24.0F;
+			std::vector<std::string> lines(1);
+			size_t i = 0;
+			while (i < text.size()) {
+				size_t j = text.find(' ', i);
+				if (j == std::string::npos)
+					j = text.size();
+				const std::string word = text.substr(i, j - i);
+				const std::string tryLine = lines.back().empty() ? word : lines.back() + " " + word;
+				if (!lines.back().empty() && font.Measure(tryLine).x > inner)
+					lines.push_back(word);
+				else
+					lines.back() = tryLine;
+				i = j + 1;
+			}
+			const float lh = font.Measure("Ag").y;
+			const float pad = 12.0F * k;
+			const float boxW = layoutW * k;
+			const float boxH = (lh * (float)(lines.size() + 1) + 24.0F) * k;
+			const AABB2 box(at.x - boxW * 0.5F, at.y, boxW, boxH);
+			renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, 0.75F));
+			renderer->DrawImage(nullptr, box);
+			renderer->SetColorAlphaPremultiplied(accent);
+			renderer->DrawImage(nullptr, AABB2(box.GetMinX(), box.GetMinY(), 4.0F * k, boxH));
+			float y = box.GetMinY() + pad;
+			font.Draw(title, MakeVector2(box.GetMinX() + pad, y), k, accent);
+			y += lh * k;
+			for (const auto& l : lines) {
+				font.Draw(l, MakeVector2(box.GetMinX() + pad, y), k, MakeVector4(1, 1, 1, 1));
+				y += lh * k;
+			}
+		}
+
+		void Client::DrawTrainingTip() {
+			std::string title, tip;
+			if (!TrainingTip(false, title, tip))
+				return;
+			const float w = std::min(560.0F, renderer->ScreenWidth() - 32.0F);
+			DrawTipBox(title, tip, MakeVector4(1, 0.85F, 0.3F, 1),
+			           MakeVector2(renderer->ScreenWidth() * 0.5F, 64.0F), w, 1.0F);
+		}
+
+		void Client::DrawInEachVREye(const std::function<void()>& draw, int firstCanvas) {
+			const SceneDefinition head = lastSceneDef;
+			if (head.numVREyes != 2)
+				return;
+			for (int e = 0; e < 2; e++) {
+				if (!renderer->SetVRCanvas(firstCanvas + e))
+					continue;
+				SceneDefinition eye = head;
+				const SceneDefinition::VREye& v = head.vrEyes[e];
+				eye.viewOrigin = v.origin;
+				eye.viewAxis[0] = v.axis[0];
+				eye.viewAxis[1] = v.axis[1];
+				eye.viewAxis[2] = v.axis[2];
+				eye.fovX = v.fovX;
+				eye.fovY = v.fovY;
+				eye.asymmetric = v.asymmetric;
+				eye.tangents = v.tangents;
+				lastSceneDef = eye;
+				UpdateMatrices(); // with the eye canvas's size
+				vrEyeOverlayPass = true;
+				draw();
+				vrEyeOverlayPass = false;
+				renderer->SetVRCanvas(0);
+			}
+			lastSceneDef = head;
+			UpdateMatrices();
+		}
+
+		void Client::DrawVRReflexDot() {
+			// Called per eye: the dot is where this eye's line along the barrel
+			// crosses the sight's window, and is seen only through it, so it
+			// stands at infinity on the barrel's line, as a reflex sight's does,
+			// in both eyes alike. Its size is a fixed angle, 3 milliradians.
+			// The setting's Cross (4) draws a thin cross there instead.
+			const Vector3 eye = lastSceneDef.viewOrigin;
+			const Vector3 dir = vrRig.reflexDir;
+			const float depth = Vector3::Dot(vrRig.reflexCenter - eye, dir);
+			if (depth < 0.02F)
+				return;
+			const Vector3 at = eye + dir * depth;
+			if ((at - vrRig.reflexCenter).GetLength() > vrRig.reflexRadius)
+				return;
+			Vector3 side = Vector3::Cross(dir, MakeVector3(0.0F, 0.0F, 1.0F));
+			if (side.GetLength() < 1.0E-3F)
+				side = MakeVector3(1.0F, 0.0F, 0.0F);
+			Vector2 centre, edge;
+			if (!Project(at, centre) || !Project(at + side.Normalize() * (depth * 0.003F), edge))
+				return;
+			const float r = std::max(1.5F, (edge - centre).GetLength());
+			if ((int)cg_reflexScope == 4) {
+				// Two bars, 8 milliradians across, added to what is behind them
+				const float len = r * (8.0F / 3.0F), thick = std::max(1.0F, r * 0.3F);
+				renderer->SetColorAlphaPremultiplied(MakeVector4(1.0F, 0.1F, 0.06F, 0.0F));
+				renderer->DrawImage(nullptr, AABB2(centre.x - len, centre.y - thick * 0.5F,
+				                                   len * 2.0F, thick));
+				renderer->DrawImage(nullptr, AABB2(centre.x - thick * 0.5F, centre.y - len, thick,
+				                                   len * 2.0F));
+				return;
+			}
+			Handle<IImage> ball = renderer->RegisterImage("Gfx/Ball.png");
+			// A red glow round a bright core, added to what is behind it
+			renderer->SetColorAlphaPremultiplied(MakeVector4(1.0F, 0.05F, 0.03F, 0.0F));
+			renderer->DrawImage(*ball, AABB2(centre.x - r * 2.0F, centre.y - r * 2.0F, r * 4.0F,
+			                                 r * 4.0F));
+			renderer->SetColorAlphaPremultiplied(MakeVector4(1.0F, 0.6F, 0.5F, 0.0F));
+			renderer->DrawImage(*ball, AABB2(centre.x - r, centre.y - r, r * 2.0F, r * 2.0F));
+		}
+
+		void Client::DrawVRScopeLens() {
+			// Called per eye, with Project set to that eye: the lens lands where it
+			// is on the gun in each eye, so it sits at its own depth.
+			IImage* image = renderer->GetVRScopeImage();
+			Vector2 centre;
+			if (!Project(vrRig.scopeLensPos, centre))
+				return;
+			// Its size by the angle it fills, at the middle of the view's scale:
+			// the rim projected near the edge of the eye's picture spread far
+			// wider than the lens looked (with the cross as thick as a felt-tip
+			// at world scale 1, testers' report).
+			const float dist = (vrRig.scopeLensPos - lastSceneDef.viewOrigin).GetLength();
+			const float pixelsPerTangent =
+			  renderer->ScreenWidth() / std::max(0.01F, lastSceneDef.GetFovTangents().Width());
+			const float r = pixelsPerTangent * vrRig.scopeLensRadius / std::max(0.01F, dist);
+			if (r < 4.0F)
+				return;
+
+			// A black rim, then the picture, both clipped round.
+			renderer->BeginClippingCircle(centre, r * 1.08F);
+			renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, 1));
+			renderer->DrawImage(nullptr, AABB2(centre.x - r * 1.1F, centre.y - r * 1.1F, r * 2.2F,
+			                                   r * 2.2F));
+			renderer->EndClippingCircle();
+			// The lens through a wall: black, not the far side (ClientPlayer).
+			if (vrRig.scopeBlocked || !image)
+				return;
+
+			renderer->BeginClippingCircle(centre, r);
+			renderer->SetColorAlphaPremultiplied(MakeVector4(1, 1, 1, 1));
+			// The picture is a render target, top row first, as the 2D layer's
+			// images are on this renderer (the vr branch's had them bottom row
+			// first, and drew it from flipped source rectangles: upside down here,
+			// testers' report).
+			//
+			// A fisheye: the picture is a plain perspective view out to the rim's
+			// half-angle E, and a point at angle alpha off the axis is drawn at
+			// lens radius rho with alpha = C rho + (E - C) rho^3, C the centre's
+			// half-angle. The centre is then magnified as a monitor's scope is
+			// (see ClientPlayer) and the rim squeezed. Drawn as a grid of cells
+			// over the picture, each to where its corners land; the 2D layer only
+			// maps a rectangle to a parallelogram, so the cells are small.
+			const float w = image->GetWidth(), h = image->GetHeight();
+			const float C = vrRig.scopeCentreHalf, E = vrRig.scopeEdgeHalf;
+			const float tanE = std::tan(E);
+			auto warp = [&](float nx, float ny) -> Vector2 {
+				const float u = std::sqrt(nx * nx + ny * ny);
+				if (u < 1.0E-5F)
+					return centre;
+				const float alpha = std::atan(u * tanE);
+				// Newton on C rho + (E - C) rho^3 = alpha, monotonic in rho.
+				float rho = alpha / std::max(C, 1.0E-4F);
+				for (int k = 0; k < 6; k++) {
+					const float g = C * rho + (E - C) * rho * rho * rho - alpha;
+					const float dg = C + 3.0F * (E - C) * rho * rho;
+					rho -= g / std::max(dg, 1.0E-5F);
+				}
+				return centre + MakeVector2(nx, ny) * (rho * r / u);
+			};
+			// The plain picture underneath: where two cells do not quite meet,
+			// it shows instead of the black rim (a grid of black lines in the
+			// headset, the first time).
+			renderer->DrawImage(image, AABB2(centre.x - r, centre.y - r, r * 2.0F, r * 2.0F),
+			                    AABB2(0.0F, 0.0F, w, h));
+			const int N = 20;
+			for (int j = 0; j < N; j++) {
+				const float ny0 = -1.0F + 2.0F * j / N, ny1 = -1.0F + 2.0F * (j + 1) / N;
+				for (int i = 0; i < N; i++) {
+					const float nx0 = -1.0F + 2.0F * i / N, nx1 = -1.0F + 2.0F * (i + 1) / N;
+					const Vector2 tl = warp(nx0, ny0), tr = warp(nx1, ny0), bl = warp(nx0, ny1);
+					// Cells wholly outside the lens are clipped anyway.
+					const Vector2 mid = (tr + bl) * 0.5F;
+					if ((mid - centre).GetLength() > r * 1.2F)
+						continue;
+					// Each cell a pixel bigger all round, and its source with it,
+					// so neighbours overlap and still show the same picture: a cell
+					// is a parallelogram on its fourth corner, which misses the
+					// next cell's by a hair.
+					const Vector2 e1 = tr - tl, e2 = bl - tl;
+					const float l1 = e1.GetLength(), l2 = e2.GetLength();
+					if (l1 < 1.0E-3F || l2 < 1.0E-3F)
+						continue;
+					const float a = 1.0F / l1, b = 1.0F / l2;
+					const Vector2 o = tl - e1 * a - e2 * b;
+					const float sw = w / N, sh = h / N;
+					renderer->DrawImage(
+					  image, o, o + e1 * (1.0F + 2.0F * a), o + e2 * (1.0F + 2.0F * b),
+					  AABB2((nx0 + 1.0F) * 0.5F * w - sw * a, (ny0 + 1.0F) * 0.5F * h - sh * b,
+					        sw * (1.0F + 2.0F * a), sh * (1.0F + 2.0F * b)));
+				}
+			}
+			// The reticle: a thin cross along the gun's own right and up, so it
+			// cants with the gun (the picture stays level with the world, as a real
+			// scope's does). Each arm is the gun's axis projected into this eye.
+			const float t = std::max(1.0F, r * 0.015F);
+			renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, 0.9F));
+			auto arm = [&](const Vector3& axis) {
+				Vector2 end;
+				if (!Project(vrRig.scopeLensPos + axis * vrRig.scopeLensRadius, end))
+					return;
+				Vector2 u = end - centre;
+				if (u.GetLength() < 1.0E-3F)
+					return;
+				u = u.Normalize();
+				const Vector2 n = MakeVector2(-u.y, u.x) * (t * 0.5F);
+				const Vector2 a = centre - u * (r * 1.1F), b = centre + u * (r * 1.1F);
+				renderer->DrawImage(nullptr, a - n, b - n, a + n, AABB2(0.0F, 0.0F, 1.0F, 1.0F));
+			};
+			arm(vrRig.scopeGunRight);
+			arm(vrRig.scopeGunUp);
+			renderer->EndClippingCircle();
+		}
+
+		void Client::DrawVRFrameRate() {
+			// Below the headset's rate, the runtime makes up the missing frames by
+			// warping old ones, and the world wobbles and loses its solidity.
+			IFont& font = fontManager->GetMediumFont(); // nothing small on the wrist
+			std::string text = ToString(static_cast<int>(std::lround(vrRig.fps))) + " fps";
+			float gpuMs = 0.0F, scale = 1.0F;
+			if (renderer->GetVRFrameStats(gpuMs, scale)) {
+				char buf[64];
+				std::snprintf(buf, sizeof(buf), "  GPU %.1f ms  eyes %d%%", gpuMs,
+				              static_cast<int>(scale * 100.0F + 0.5F));
+				text += buf;
+			}
+			Vector2 size = font.Measure(text);
+			Vector2 pos = MakeVector2(std::floor((renderer->ScreenWidth() - size.x) * 0.5F),
+			                          renderer->ScreenHeight() - size.y - 8.0F);
+			font.DrawShadow(text, pos, 1.0F, MakeVector4(1, 1, 1, 0.8F), MakeVector4(0, 0, 0, 0.6F));
+		}
+
+		void Client::DrawVRWristMenu() {
+			IFont& big = fontManager->GetLargeFont();
+			IFont& mid = fontManager->GetMediumFont();
+			IFont& small = fontManager->GetGuiFont();
+			IntVector3 current = MakeIntVector3(-1, -1, -1);
+			if (auto p = world->GetLocalPlayer())
+				current = p->GetBlockColor();
+
+			auto frame = [&](const AABB2& r, float b, const Vector4& c) {
+				renderer->SetColorAlphaPremultiplied(c);
+				renderer->DrawImage(nullptr, AABB2(r.GetMinX(), r.GetMinY(), r.GetWidth(), b));
+				renderer->DrawImage(nullptr,
+				                    AABB2(r.GetMinX(), r.GetMaxY() - b, r.GetWidth(), b));
+				renderer->DrawImage(nullptr, AABB2(r.GetMinX(), r.GetMinY() + b, b,
+				                                   r.GetHeight() - b * 2.0F));
+				renderer->DrawImage(nullptr, AABB2(r.GetMaxX() - b, r.GetMinY() + b, b,
+				                                   r.GetHeight() - b * 2.0F));
+			};
+			auto centred = [&](IFont& f, const std::string& text, const AABB2& r) {
+				Vector2 size = f.Measure(text);
+				Vector2 at = MakeVector2(r.GetMinX() + (r.GetWidth() - size.x) * 0.5F,
+				                         r.GetMinY() + (r.GetHeight() - size.y) * 0.5F);
+				f.Draw(text, MakeVector2(std::floor(at.x), std::floor(at.y)), 1.0F,
+				       MakeVector4(1, 1, 1, 1));
+			};
+
+			const std::vector<VRWristButton> buttons = VRWristMenuLayout();
+			for (std::size_t i = 0; i < buttons.size(); i++) {
+				const VRWristButton& b = buttons[i];
+				const bool hot = static_cast<int>(i) == vrRig.wristHover;
+				if (b.kind == VRWristButton::Colour) {
+					const Vector4 c = MakeVector4(b.color.x / 255.0F, b.color.y / 255.0F,
+					                              b.color.z / 255.0F, 1.0F);
+					AABB2 r = b.rect;
+					r = AABB2(r.GetMinX() + 2.0F, r.GetMinY() + 2.0F, r.GetWidth() - 4.0F,
+					          r.GetHeight() - 4.0F);
+					renderer->SetColorAlphaPremultiplied(c);
+					renderer->DrawImage(nullptr, r);
+					if (b.color == current)
+						frame(r, 5.0F, MakeVector4(1, 1, 1, 1));
+					else if (hot)
+						frame(r, 3.0F, MakeVector4(0.8F, 0.8F, 0.8F, 1));
+					continue;
+				}
+				const float a = hot ? 0.55F : 0.25F;
+				renderer->SetColorAlphaPremultiplied(MakeVector4(a, a, a, 0.9F));
+				renderer->DrawImage(nullptr, b.rect);
+				switch (b.kind) {
+					case VRWristButton::Chat: centred(big, _Tr("Client", "Chat"), b.rect); break;
+					case VRWristButton::TeamChat:
+						centred(big, _Tr("Client", "Team chat"), b.rect);
+						break;
+					case VRWristButton::Phrase:
+						centred(mid, _Tr("Client", VRQuickPhrase(b.index)), b.rect);
+						break;
+					case VRWristButton::Menu: centred(mid, _Tr("Client", "Menu"), b.rect); break;
+					case VRWristButton::Light: {
+						auto local = world->GetLocalPlayer();
+						centred(mid,
+						        local && local->IsFlashlightOn() ? _Tr("Client", "Light: on")
+						                                         : _Tr("Client", "Light: off"),
+						        b.rect);
+					} break;
+					case VRWristButton::Team:
+						centred(mid, _Tr("Client", "Team / weapon"), b.rect);
+						break;
+					case VRWristButton::QuickTarget:
+						centred(mid,
+						        vrRig.wristToTeam ? _Tr("Client", "Quick chat to: team")
+						                          : _Tr("Client", "Quick chat to: everyone"),
+						        b.rect);
+						break;
+					default: break;
+				}
+			}
+
+			// The colour held, under the palette.
+			const AABB2 swatch(500.0F, 470.0F, 120.0F, 110.0F);
+			if (current.x >= 0) {
+				renderer->SetColorAlphaPremultiplied(MakeVector4(
+				  current.x / 255.0F, current.y / 255.0F, current.z / 255.0F, 1.0F));
+				renderer->DrawImage(nullptr, swatch);
+				frame(swatch, 3.0F, MakeVector4(1, 1, 1, 1));
+			}
+			small.Draw(_Tr("Client", "Block colour"), MakeVector2(636.0F, 480.0F), 1.0F,
+			           MakeVector4(1, 1, 1, 0.9F));
+			small.Draw(_Tr("Client", "Touch or point and pull"), MakeVector2(636.0F, 510.0F), 1.0F,
+			           MakeVector4(1, 1, 1, 0.6F));
+
+			// Where the tool hand points.
+			if (vrRig.wristPointing) {
+				const Vector2 c = vrRig.wristCursor;
+				renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, 0.8F));
+				renderer->DrawImage(nullptr, AABB2(c.x - 9.0F, c.y - 9.0F, 18.0F, 18.0F));
+				renderer->SetColorAlphaPremultiplied(MakeVector4(1.0F, 0.15F, 0.1F, 1.0F));
+				renderer->DrawImage(nullptr, AABB2(c.x - 6.0F, c.y - 6.0F, 12.0F, 12.0F));
+			}
+		}
+
+		void Client::DrawVRWatch(Player& p, int clipNum, int stockNum, int clipSize,
+		                         bool isToolWeapon, bool isReloading) {
+			// The wrist as a watch (testers asked): health and ammo large along
+			// its bottom, readable at a glance, where the monitor's corner numbers
+			// were small on a panel a hand's width across. The map, feeds and chat
+			// keep their places above.
+			const float sw = renderer->ScreenWidth(), sh = renderer->ScreenHeight();
+			IFont& font = fontManager->GetSquareDesignFont();
+			// The captions over the numbers: they stayed small when the numbers
+			// grew (testers)
+			IFont& label = fontManager->GetMediumFont();
+			const Vector4 color = GetHUDColor(p);
+			const Vector4 red = MakeVector4(1.0F, 0.1F, 0.05F, 1.0F);
+			const Vector4 shadow = MakeVector4(0.0F, 0.0F, 0.0F, 0.6F);
+			const Vector4 white = MakeVector4(1.0F, 1.0F, 1.0F, 0.85F);
+			const float scale = 3.0F, pad = 28.0F;
+			auto big = [&](const std::string& value, float x, bool alignRight, Vector4 col,
+			               const std::string& caption) {
+				const Vector2 size = font.Measure(value) * scale;
+				const Vector2 pos = MakeVector2(alignRight ? x - size.x : x, sh - pad - size.y);
+				font.Draw(value, pos + MakeVector2(3.0F, 3.0F), scale, shadow);
+				font.Draw(value, pos, scale, col);
+				const Vector2 ls = label.Measure(caption);
+				label.DrawShadow(caption,
+				                 MakeVector2(alignRight ? x - ls.x : x, pos.y - ls.y - 2.0F), 1.0F,
+				                 white, shadow);
+			};
+
+			const float hurt = std::max(0.0F, 1.0F - (time - lastHurtTime) / 0.25F);
+			const float hpFrac = Clamp(static_cast<float>(lastHealth) / 100.0F, 0.0F, 1.0F);
+			const Vector4 hpCol = color + (red - color) * (1.0F - hpFrac);
+			big(ToString(lastHealth), pad, false, hpCol + (MakeVector4(1, 1, 1, 1) - hpCol) * hurt,
+			    _Tr("Client", "Health"));
+
+			std::string value, caption;
+			float per = 1.0F;
+			if (isToolWeapon) {
+				value = ToString(clipNum) + "-" + ToString(stockNum);
+				caption = isReloading ? _Tr("Client", "Reloading") : _Tr("Client", "Ammo");
+				per = Clamp(static_cast<float>(clipNum) / std::max(1.0F, clipSize / 3.0F), 0.0F,
+				            1.0F);
+			} else if (p.IsToolGrenade()) {
+				value = ToString(p.GetNumGrenades());
+				caption = _Tr("Client", "Grenades");
+			} else {
+				value = ToString(p.GetNumBlocks());
+				caption = _Tr("Client", "Blocks");
+			}
+			big(value, sw - pad, true, color + (red - color) * (1.0F - per), caption);
+		}
+
+		void Client::DrawVRWristBackdrop() {
+			// A dark glass so the HUD reads against whatever is behind the wrist.
+			float sw = renderer->ScreenWidth();
+			float sh = renderer->ScreenHeight();
+			renderer->SetColorAlphaPremultiplied(MakeVector4(0.0F, 0.0F, 0.0F, 0.45F));
+			renderer->DrawImage(nullptr, AABB2(0.0F, 0.0F, sw, sh));
+			const float b = 3.0F;
+			renderer->SetColorAlphaPremultiplied(MakeVector4(0.5F, 0.5F, 0.5F, 0.5F));
+			renderer->DrawImage(nullptr, AABB2(0.0F, 0.0F, sw, b));
+			renderer->DrawImage(nullptr, AABB2(0.0F, sh - b, sw, b));
+			renderer->DrawImage(nullptr, AABB2(0.0F, b, b, sh - b * 2.0F));
+			renderer->DrawImage(nullptr, AABB2(sw - b, b, b, sh - b * 2.0F));
+		}
+
 		void Client::DrawReloadIndicator(const Vector4& col) {
 			SPADES_MARK_FUNCTION();
 
@@ -2555,7 +3161,9 @@ namespace spades {
 			fade = 1.0F - (fade / fadeDuration);
 			fade = Clamp(fade, 0.0F, 1.0F);
 
-			if (fade > 0.0F) {
+			// (Not in a headset, where the 2D layer is a panel in the air and this
+			// would be a black board hanging in front of you.)
+			if (fade > 0.0F && !IsVRFrameActive()) {
 				renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, fade));
 				renderer->DrawImage(nullptr, AABB2(0, 0, sw, sh));
 			}
@@ -2568,91 +3176,186 @@ namespace spades {
 			if (maybePlayer) { // joined local player
 				Player& player = maybePlayer.value();
 
-				if (cg_playerNamesDead && !debugScreenVisible)
-					DrawDeadPlayers();
-
 				bool localPlayerIsSpectator = player.IsSpectator() || staffSpectating;
-				if (!localPlayerIsSpectator) {
-					if (cg_hurtScreenEffects) {
-						DrawHurtSprites();
-						DrawScreenEffect(true);
+				const bool vrFrame = IsVRFrameActive();
+
+				// In a headset the HUD goes on the wrist panel, and is drawn only on
+				// the frames the wrist is being looked at. The views you call up on
+				// purpose (big map, scoreboard) stay on the panel in front, as does
+				// the chat while you type into it.
+				const bool onWrist = vrFrame && (int)vr_wristHud != 0 && shouldDrawHUD;
+				const bool chatInFront =
+				  onWrist && (AcceptsTextInput() || isChatPanelVisible);
+
+				// Names, boxes, chevrons, pings and damage numbers: what is pinned to
+				// places in the world. In a headset they are drawn into each eye's
+				// picture with that eye's projection, so they appear at the depth of
+				// what they label. On the flat panel a name over someone 30 blocks
+				// away was 1.5m in front of you, and the two eyes disagreed.
+				auto drawPinned = [&](bool inEye) {
+					if (cg_playerNamesDead && !debugScreenVisible)
+						DrawDeadPlayers();
+
+					if (!localPlayerIsSpectator) {
+						// (Not in a headset: a full-screen effect on a panel in the
+						// air is a tinted rectangle.)
+						if (cg_hurtScreenEffects && !vrFrame) {
+							DrawHurtSprites();
+							DrawScreenEffect(true);
+						}
+
+						if (cg_healScreenEffects && !vrFrame)
+							DrawScreenEffect(false);
+
+						if (cg_playerNames && !debugScreenVisible)
+							DrawHottrackedPlayerName();
+
+						if (cg_damageIndicators && !debugScreenVisible)
+							DrawDamageIndicators();
+					} else if (spectatorPlayerNames && !debugScreenVisible) { // only if we are spectating
+						DrawPubOVL();
 					}
 
-					if (cg_healScreenEffects)
-						DrawScreenEffect(false);
-
-					if (cg_playerNames && !debugScreenVisible)
-						DrawHottrackedPlayerName();
-
-					if (cg_damageIndicators && !debugScreenVisible)
-						DrawDamageIndicators();
-				} else if (spectatorPlayerNames && !debugScreenVisible) { // only if we are spectating
-					DrawPubOVL();
-				}
-
-				// Teamplay marks and pings come from the server and are drawn
-				// whether or not the local player is spectating; the team overlay is the
-				// local player's own view of their team and is not.
-				if (!debugScreenVisible) {
+					// Teamplay marks and pings come from the server and are drawn
+					// whether or not the local player is spectating; the team overlay
+					// is the local player's own view of their team and is not.
+					if (debugScreenVisible)
+						return;
 					DrawEspMarks();
-					DrawLocalPlayerMarkedIndicator();
+					if (!onWrist && !inEye)
+						DrawLocalPlayerMarkedIndicator();
 					DrawTeamplayPings();
 					if (!localPlayerIsSpectator)
 						DrawTeamOverlay();
+				};
+				if (vrFrame) {
+					DrawInEachVREye([&]() {
+						drawPinned(true);
+						if (vrRig.scopeActive)
+							DrawVRScopeLens();
+						if (vrRig.reflexActive)
+							DrawVRReflexDot();
+					});
+					if (!onWrist)
+						DrawLocalPlayerMarkedIndicator();
+				} else {
+					drawPinned(false);
 				}
 
 				if (shouldDrawHUD) {
-					// draw firstperson camera player HUD
-					if (IsFirstPerson(GetCameraMode()))
+					// draw firstperson camera player HUD (not in a headset: its
+					// crosshair and scope belong to a screen, and the gun in your
+					// hand is the sight)
+					if (IsFirstPerson(GetCameraMode()) && !vrFrame)
 						DrawFirstPersonHUD();
 
-					tcView->Draw();
-
-					if (cg_hudPlayerCount)
-						DrawAlivePlayersCount();
-
-					// draw map
 					bool largeMap = largeMapView->IsZoomed();
-					if (!largeMap)
-						mapView->Draw();
+					// In a headset the big map is held in the off hand, on the wrist
+					// panel's image (the VR system put the panel there this frame).
+					const bool heldMap = onWrist && largeMap && (int)vr_heldMap;
 
-					if (!localPlayerIsSpectator) { // player is not spectator
-						if (cg_playerStats)
-							DrawPlayerStats();
-						if (!player.IsToolBlock() && !debugHitTestZoom)
-							DrawHitTestDebugger();
-
-						if (player.IsAlive()) {
-							DrawJoinedAlivePlayerHUD();
-						} else {
-							DrawDeadPlayerHUD();
-							DrawSpectateHUD();
+					if (!onWrist || renderer->SetVRCanvas(1)) {
+						vrWristPass = onWrist;
+						if (onWrist)
+							DrawVRWristBackdrop();
+						// Chat, kill feed and centre messages half as large again on
+						// the wrist: at the gui font's 16 pixels they were hard to
+						// make out there (testers).
+						if (onWrist) {
+							chatWindow->SetTextScale(&fontManager->GetMediumFont(), 1.5F);
+							// Over the watch face's numbers (DrawVRWatch), which the
+							// larger chat ran into (testers)
+							chatWindow->SetBottomMargin(180.0F);
+							killfeedWindow->SetTextScale(&fontManager->GetMediumFont(), 1.5F);
+							centerMessageView->SetFont(&fontManager->GetLargeFont());
 						}
-					} else {
-						DrawSpectateHUD();
-					}
-					
-					// the chat panel shows the history by itself while it is open
-					if (!isChatPanelVisible)
-						chatWindow->Draw();
-					killfeedWindow->Draw();
-					
-					if (netgraphVisible && !isDemoMode)
-						DrawNetGraph();
 
-					if (debugHitTestZoom)
+						// The other hand at the wrist: the wrist menu instead. The big
+						// map held in the hand (vr_heldMap): only the map.
+						const bool wristMenu = onWrist && vrRig.wristMenu;
+						if (heldMap) {
+							largeMapView->Draw();
+						} else if (wristMenu) {
+							DrawVRWristMenu();
+						} else {
+							tcView->Draw();
+
+							if (cg_hudPlayerCount)
+								DrawAlivePlayersCount();
+
+							// draw map (not on the wrist: the big map is a button away,
+							// and the watch is for health and ammo, testers)
+							if (!largeMap && !onWrist)
+								mapView->Draw();
+
+							if (!localPlayerIsSpectator) { // player is not spectator
+								if (cg_playerStats)
+									DrawPlayerStats();
+								if (!player.IsToolBlock() && !debugHitTestZoom && !vrFrame)
+									DrawHitTestDebugger();
+
+								if (player.IsAlive()) {
+									DrawJoinedAlivePlayerHUD();
+								} else {
+									DrawDeadPlayerHUD();
+									DrawSpectateHUD();
+								}
+							} else {
+								DrawSpectateHUD();
+							}
+
+							// the chat panel shows the history by itself while it is open
+							if (!chatInFront && !isChatPanelVisible)
+								chatWindow->Draw();
+							// Not the kill feed on the wrist (testers)
+							if (!onWrist)
+								killfeedWindow->Draw();
+
+							// above the chat
+							if (netgraphVisible && !isDemoMode)
+								DrawNetGraph();
+
+						}
+
+						if (onWrist) {
+							if (!wristMenu && !heldMap) {
+								DrawLocalPlayerMarkedIndicator();
+								DrawAlert();
+								centerMessageView->Draw();
+								if ((int)vr_showFps)
+									DrawVRFrameRate();
+							}
+							renderer->SetVRCanvas(0);
+							chatWindow->SetTextScale(nullptr, 1.0F);
+							chatWindow->SetBottomMargin(64.0F);
+							killfeedWindow->SetTextScale(nullptr, 1.0F);
+							centerMessageView->SetFont(nullptr);
+						}
+						vrWristPass = false;
+					}
+
+					if (chatInFront && !isChatPanelVisible)
+						chatWindow->Draw();
+
+					// Where the hits came from, around where you look.
+					if (onWrist && !localPlayerIsSpectator && player.IsAlive())
+						hurtRingView->Draw();
+
+					if (debugHitTestZoom && !vrFrame)
 						DrawHitTestDebugger();
 
 					// large map view should come in front
-					if (largeMap)
+					if (largeMap && !heldMap)
 						largeMapView->Draw();
 				}
 
 				if (pieMenuView && pieMenuView->IsOpen())
 					pieMenuView->Draw();
 
-				DrawAlert();
-				centerMessageView->Draw();
+				if (!onWrist) {
+					DrawAlert();
+					centerMessageView->Draw();
+				}
 				if (scoreboardVisible)
 					scoreboard->Draw();
 
@@ -2716,16 +3419,33 @@ namespace spades {
 					DrawStats();
 			}
 
-			if (debugScreenVisible)
-				DrawDebugScreen();
-
-			// Mouse cursor for the demo timeline (paused demos only)
-			if (isDemoMode)
-				DrawDemoCursor();
+			// On the training course, the tip for where you are (in a
+			// headset it is drawn in each eye instead, DrawVRTutorial).
+			if (!IsVRFrameActive() && !IsLimboViewActive())
+				DrawTrainingTip();
 
 			// draw limbo view (above everything)
 			if (IsLimboViewActive() && !scriptedUI->NeedsInput())
 				limboMenu->Draw();
+
+			// Over everything in each eye, joined or not: the tutorial, then (on
+			// the headset-only canvases, not in the window's preview) the comfort
+			// vignette and the comfort camera's blink. A second pass on the eye
+			// canvas adds to the first.
+			if (IsVRFrameActive()) {
+				DrawInEachVREye([&]() { DrawVRTutorial(); });
+				// The headset's alone: the window's preview is taken before it
+				DrawInEachVREye(
+				  [&]() {
+					  DrawVRVignette();
+					  if (vrRig.fade > 0.0F) {
+						  renderer->SetColorAlphaPremultiplied(MakeVector4(0, 0, 0, vrRig.fade));
+						  renderer->DrawImage(nullptr, AABB2(0.0F, 0.0F, renderer->ScreenWidth(),
+						                                     renderer->ScreenHeight()));
+					  }
+				  },
+				  4);
+			}
 		}
 
 		void Client::Draw2DWithoutWorld() {

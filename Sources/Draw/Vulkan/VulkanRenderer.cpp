@@ -65,18 +65,41 @@
 #include "VulkanColorCorrectionFilter.h"
 #include "VulkanLensFlareFilter.h"
 #include "VulkanAmbientShadowRenderer.h"
+#include "VulkanMapOccupancy.h"
 #include "VulkanRadiosityRenderer.h"
 #include <Gui/SDLVulkanDevice.h>
 #include <Client/GameMap.h>
+#include <Client/VRState.h>
 #include <Core/Bitmap.h>
 #include <Core/Debug.h>
 #include <Core/Exception.h>
 #include <Core/FileManager.h>
 #include <Core/Settings.h>
 #include <cstring>
+#include <functional>
 #include <vector>
+#if USE_OPENXR
+#include <VR/OpenXRSystem.h>
+#endif
 
 SPADES_SETTING(r_dlights);
+// Multiview: run the post filters that can over both eyes at once (1), or every
+// filter once per eye on a copy of its eye (0: the control).
+DEFINE_SPADES_SETTING(r_multiviewFilters, "1");
+// Both eyes in one render pass (VK_KHR_multiview), as a standalone headset needs.
+// Read when the renderer starts.
+DEFINE_SPADES_SETTING(vr_multiview, "0");
+// Foveated rendering in a headset: the edges of each eye shaded at lower
+// density (0 off, 1 low, 2 medium, 3 high). Read when the renderer starts; only
+// where the GPU has VK_EXT_fragment_density_map (a Quest's does). Not used for
+// now (see the renderer's constructor): kept for when it is made to pay.
+DEFINE_SPADES_SETTING(vr_foveation, "0");
+SPADES_SETTING(r_hdr);
+SPADES_SETTING(r_bloom);
+SPADES_SETTING(r_fogShadow);
+SPADES_SETTING(r_modelShadows);
+SPADES_SETTING(r_radiosity);
+SPADES_SETTING(r_physicalLighting);
 SPADES_SETTING(r_depthOfField);
 SPADES_SETTING(r_fxaa);
 SPADES_SETTING(r_temporalAA);
@@ -88,6 +111,11 @@ SPADES_SETTING(r_scaleFilter);
 SPADES_SETTING(r_outlines);
 SPADES_SETTING(r_colorCorrection);
 SPADES_SETTING(r_lensFlare);
+SPADES_SETTING(r_waterInScene);
+// The scene pass resolving its colour itself and storing no depth, where nothing
+// reads the depth after it (VulkanRenderer::SceneResolvesInPass). A headset's
+// mobile settings turn it on.
+DEFINE_SPADES_SETTING(r_resolveInPass, "0");
 
 namespace {
 	// Sky pipeline push constants, shared between the pipeline layout (range size)
@@ -98,8 +126,8 @@ namespace {
 		float viewAxisFront[3]; float _pad1;
 		float viewAxisUp[3];    float _pad2;
 		float viewAxisSide[3];  float _pad3;
-		float fovX;
-		float fovY;
+		// The view's edges as tangents (SceneDefinition::GetFovTangents).
+		float tanLeft, tanRight, tanDown, tanUp;
 	};
 	static_assert(sizeof(SkyPushConstants) <= spades::draw::kPortablePushConstantsSize,
 	              "push constants must fit the 128 bytes every device has (VulkanPushConstants.h)");
@@ -154,6 +182,9 @@ namespace spades {
 			renderWidth = static_cast<int>(renderExtent.width);
 			renderHeight = static_cast<int>(renderExtent.height);
 		}
+		uiWidth = device->ScreenWidth();
+		uiHeight = device->ScreenHeight();
+		SetupVRUILayout();
 
 		// Initialize program manager, pipeline cache and model manager
 		try {
@@ -163,8 +194,41 @@ namespace spades {
 			temporaryImagePool = Handle<VulkanTemporaryImagePool>::New(device);
 			InitializeVulkanResources();  // Create semaphores for synchronization
 
+			// Both eyes in one pass, when asked and possible. Decided before any
+			// pipeline exists: they are all built for it (or not).
+#if USE_OPENXR
+			{
+				vr::OpenXRSystem* xr = vr::GetOpenXRSystem();
+				const bool headset = xr && xr->HasSession();
+				if ((bool)vr_multiview && headset && !device->HasMultiview())
+					SPLog("Multiview: not supported by this GPU; each eye drawn on its own");
+				multiview = (bool)vr_multiview && headset && device->HasMultiview();
+				// Foveation is off whatever vr_foveation says, for now: it crashed a
+				// Quest 2's driver (Adreno 650) at the end of each eye frame, and a
+				// Quest 3 measured no faster with it. Into non-subsampled targets
+				// the driver fills the coarse areas back in at every store; the
+				// saving needs subsampled targets, read by the post chain with
+				// subsampled samplers. A config that saved it on is ignored.
+				foveation = 0;
+			}
+#endif
+			SpirvCache::SetMultiview(multiview);
+			{
+				VkDescriptorSetLayoutCreateInfo ei{};
+				ei.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+				if (vkCreateDescriptorSetLayout(device->GetDevice(), &ei, nullptr,
+				                                &emptySetLayout) != VK_SUCCESS)
+					SPRaise("Failed to create the empty set layout");
+			}
+			if (multiview) {
+				CreateViewSets();
+				SPLog("Multiview: both eyes in one pass (vr_multiview)");
+			}
+
 			// Create framebuffer manager for offscreen rendering
-			framebufferManager = stmp::make_unique<VulkanFramebufferManager>(device, settings, renderWidth, renderHeight);
+			framebufferManager = stmp::make_unique<VulkanFramebufferManager>(
+			  device, settings, renderWidth, renderHeight, multiview ? 2 : 1, foveation,
+			  SceneResolvesInPass());
 
 			CreateRenderPass();  // Must create render pass before framebuffers
 			CreateFramebuffers();
@@ -172,8 +236,10 @@ namespace spades {
 			CreateSkyPipeline();
 			CreateMultiplyColorPipeline();
 			CreateDebugLinePipeline();
-			glareRenderer = stmp::make_unique<VulkanGlareRenderer>(*this, renderPass,
-			                                                       device->GetMaxFramesInFlight());
+			// Per-frame resources here and below are kept for a frame in flight each,
+			// and one each for a headset's eye and scope passes, which are frames of
+			// their own (VulkanFramesInFlight.h)
+			glareRenderer = stmp::make_unique<VulkanGlareRenderer>(*this, renderPass, GetFrameSlotCount());
 
 				mapRenderer = nullptr;
 				modelRenderer = stmp::make_unique<VulkanModelRenderer>(*this);
@@ -196,15 +262,15 @@ namespace spades {
 
 			// Binds the white image in place of missing spotlight images, so it
 			// comes after it.
-			sceneLights = stmp::make_unique<VulkanSceneLights>(
-			  *this, device->GetMaxFramesInFlight());
-			sceneView = stmp::make_unique<VulkanSceneView>(*this, device->GetMaxFramesInFlight());
+			sceneLights = stmp::make_unique<VulkanSceneLights>(*this, GetFrameSlotCount());
+			sceneView = stmp::make_unique<VulkanSceneView>(*this, GetFrameSlotCount());
 
 			// Programs that take the dynamic lights say so (`*sceneLights*`), as set
 			// 2; set 1 is the model shadows' in the lit pipelines, which they lack.
+			// Multiview: the eyes' views in the set before the lights, empty without
 			programManager->RegisterDirectiveSetLayouts(
-			  "sceneLights",
-			  {sceneLights->GetEmptySetLayout(), sceneLights->GetSetLayout()});
+			  "sceneLights", {multiview ? viewSetLayout : sceneLights->GetEmptySetLayout(),
+			                  sceneLights->GetSetLayout()});
 
 			// Preload shaders
 			VulkanMapRenderer::PreloadShaders(*this);
@@ -260,10 +326,16 @@ namespace spades {
 				vkDeviceWaitIdle(vkDevice);
 			}
 
+			DestroyVRResources();
+			DestroyViewSets();
+
 			// Invalidate shared pipeline caches before cleaning up
 			VulkanOptimizedVoxelModel::InvalidateSharedPipeline(device.GetPointerOrNull());
 
 			imageRenderer.reset();
+			wristImageRenderer.reset();
+			eyeImageRenderers[0].reset();
+			eyeImageRenderers[1].reset();
 			spriteRenderer.reset();
 			longSpriteRenderer.reset();
 			modelRenderer.reset();
@@ -291,6 +363,9 @@ namespace spades {
 			ambientOcclusion.reset();
 			framebufferManager.reset();
 			programManager = nullptr;
+			if (emptySetLayout != VK_NULL_HANDLE && vkDevice != VK_NULL_HANDLE)
+				vkDestroyDescriptorSetLayout(vkDevice, emptySetLayout, nullptr);
+			emptySetLayout = VK_NULL_HANDLE;
 
 			if (temporaryImagePool) {
 				temporaryImagePool->Clear();
@@ -576,6 +651,13 @@ namespace spades {
 		}
 		swapchainFramebuffers.clear();
 
+		// The 2D layer follows the window, unless a headset gave it a layout of
+		// its own for the run
+		if (!vrUILayout) {
+			uiWidth = device->ScreenWidth();
+			uiHeight = device->ScreenHeight();
+		}
+
 		// Rebuild swapchain-dependent renderer resources.
 		CreateFramebuffers();
 		CreateCommandBuffers();
@@ -593,7 +675,15 @@ namespace spades {
 		RecreateRenderTargets();
 	}
 
+	std::size_t VulkanRenderer::GetFrameSlotCount() const {
+		return std::max<std::size_t>(device->GetMaxFramesInFlight(), MaxFrameSlots);
+	}
+
 	VkExtent2D VulkanRenderer::DesiredRenderExtent() const {
+		// A headset's eye size while it draws (EnsureRenderSize)
+		if (vrRenderExtent.width > 0 && vrRenderExtent.height > 0)
+			return vrRenderExtent;
+
 		// As GL: the window's size scaled by r_scale, kept within [0.2, 1], and
 		// at least a pixel either way
 		const float scale = std::max(0.2F, std::min(1.0F, static_cast<float>(r_scale)));
@@ -619,7 +709,9 @@ namespace spades {
 		if (depthResolveFilter)
 			depthResolveFilter->ReleaseTargets();
 		framebufferManager =
-		  stmp::make_unique<VulkanFramebufferManager>(device, settings, renderWidth, renderHeight);
+		  stmp::make_unique<VulkanFramebufferManager>(device, settings, renderWidth, renderHeight,
+		                                              multiview ? 2 : 1, foveation,
+		                                              SceneResolvesInPass());
 		waterRenderer = stmp::make_unique<VulkanWaterRenderer>(*this, map);
 		ConfigureAmbientOcclusion();
 
@@ -636,8 +728,10 @@ namespace spades {
 			projectionMatrix = sceneDef.ToVulkanProjectionMatrix();
 
 			// Temporal AA: the main view a sub-pixel off each frame (GL's
-			// BuildProjectionMatrix), in normalized device coordinates
-			if ((int)r_temporalAA && temporalAAFilter && renderWidth > 0 && renderHeight > 0) {
+			// BuildProjectionMatrix), in normalized device coordinates. Not in a
+			// headset, whose eye passes do not run it (BuildPostSteps).
+			if ((int)r_temporalAA && temporalAAFilter && !vrFrame && renderWidth > 0 &&
+			    renderHeight > 0) {
 				const Vector2 jitter = temporalAAFilter->NextJitter(renderWidth, renderHeight);
 				projectionMatrix = Matrix4::Translate(jitter.x, jitter.y, 0.0F) * projectionMatrix;
 			}
@@ -656,20 +750,41 @@ namespace spades {
 			frustrum[0].w -= sceneDef.zNear;
 			frustrum[1].w += sceneDef.zFar;
 
-			// side planes
-			float cx = cosf(sceneDef.fovX * 0.5F);
-			float sx = sinf(sceneDef.fovX * 0.5F);
-			float cy = cosf(sceneDef.fovY * 0.5F);
-			float sy = sinf(sceneDef.fovY * 0.5F);
-
+			// side planes, each through the eye and one edge, facing in. An edge at
+			// tangent t along axis a has the inward normal (front * t - a) for the
+			// right and top edges and (a - front * t) for the left and bottom ones;
+			// for a centred view these are the old (front * sin - a * cos) planes.
+			const client::FovTangents f = sceneDef.GetFovTangents();
+			const Vector3& front = sceneDef.viewAxis[2];
+			const Vector3& side = sceneDef.viewAxis[0];
+			const Vector3& up = sceneDef.viewAxis[1];
 			frustrum[2] = Plane3::PlaneWithPointOnPlane(
-			  sceneDef.viewOrigin, sceneDef.viewAxis[2] * sx - sceneDef.viewAxis[0] * cx);
+			  sceneDef.viewOrigin, (front * f.right - side).Normalize());
 			frustrum[3] = Plane3::PlaneWithPointOnPlane(
-			  sceneDef.viewOrigin, sceneDef.viewAxis[2] * sx + sceneDef.viewAxis[0] * cx);
+			  sceneDef.viewOrigin, (side - front * f.left).Normalize());
 			frustrum[4] = Plane3::PlaneWithPointOnPlane(
-			  sceneDef.viewOrigin, sceneDef.viewAxis[2] * sy - sceneDef.viewAxis[1] * cy);
+			  sceneDef.viewOrigin, (front * f.up - up).Normalize());
 			frustrum[5] = Plane3::PlaneWithPointOnPlane(
-			  sceneDef.viewOrigin, sceneDef.viewAxis[2] * sy + sceneDef.viewAxis[1] * cy);
+			  sceneDef.viewOrigin, (up - front * f.down).Normalize());
+		}
+
+		void VulkanRenderer::WidenFrustrumTo(const client::SceneDefinition& other) {
+			// Built for eye 0 (BuildFrustrum). The left eye sees furthest left and
+			// the right eye furthest right; with the eyes' axes parallel the second
+			// eye lies in the first's top and bottom planes, so those only need the
+			// looser of the two tangents.
+			const client::FovTangents a = sceneDef.GetFovTangents();
+			const client::FovTangents b = other.GetFovTangents();
+			const Vector3& oFront = other.viewAxis[2];
+			const Vector3& oSide = other.viewAxis[0];
+			frustrum[2] = Plane3::PlaneWithPointOnPlane(other.viewOrigin,
+			                                            (oFront * b.right - oSide).Normalize());
+			const Vector3& front = sceneDef.viewAxis[2];
+			const Vector3& up = sceneDef.viewAxis[1];
+			frustrum[4] = Plane3::PlaneWithPointOnPlane(
+			  sceneDef.viewOrigin, (front * std::max(a.up, b.up) - up).Normalize());
+			frustrum[5] = Plane3::PlaneWithPointOnPlane(
+			  sceneDef.viewOrigin, (up - front * std::min(a.down, b.down)).Normalize());
 		}
 
 		bool VulkanRenderer::BoxFrustrumCull(const AABB3& box) {
@@ -743,6 +858,17 @@ namespace spades {
 			}
 
 			return imageManager->RegisterImage(filename);
+		}
+
+		void VulkanRenderer::ReloadResources(const ResourceChanges& changes) {
+			SPADES_MARK_FUNCTION();
+			if (!imageManager || !modelManager)
+				return;
+
+			// The frames in flight may still use the images and buffers replaced.
+			vkDeviceWaitIdle(device->GetDevice());
+			imageManager->ReloadResources(changes);
+			modelManager->ReloadResources(changes);
 		}
 
 		Handle<client::IModel> VulkanRenderer::RegisterModel(const char* filename) {
@@ -896,8 +1022,10 @@ namespace spades {
 				ambientShadowRenderer =
 				  stmp::make_unique<VulkanAmbientShadowRenderer>(*this, *map, radiosity);
 				radiosityRenderer = stmp::make_unique<VulkanRadiosityRenderer>(*this, *map, radiosity);
+				// A frame in flight's staging each, and one each for a headset's eye
+				// and scope passes (VulkanFramesInFlight.h)
 				mapOccupancy = stmp::make_unique<VulkanMapOccupancy>(
-				  *this, *map, device->GetMaxFramesInFlight());
+				  *this, *map, GetFrameSlotCount());
 			}
 
 			// Initialize shadow map renderer first: the map/model sunlight pipeline
@@ -979,8 +1107,10 @@ namespace spades {
 			// The water's reflection keeps what lies above the water plane at 63.
 			parameters.mirrorClipZ = renderingMirror ? 63.0F : 1.0e9F;
 			parameters.sunDirection = GetSunDirection();
+			// Not in the scope's view: the occlusion is worked out from the eyes'
+			// targets, at their size
 			parameters.ambientOcclusion =
-			  ambientOcclusion &&
+			  ambientOcclusion && !vrScopePass &&
 			  ambientOcclusion->HasView(renderingMirror ? VulkanSceneView::View::Mirror
 			                                            : VulkanSceneView::View::Main);
 			return parameters;
@@ -1026,6 +1156,34 @@ namespace spades {
 			duringSceneRendering = true;
 			sceneUsedInThisFrame = true;
 
+			// A headset frame acquires nothing from the window here: the eyes are
+			// drawn in EndScene and the window gets a mirror in Flip.
+			vrFrame = IsHeadsetFrame();
+			if (vrFrame) {
+				vrEyesWanted = false;
+#if USE_OPENXR
+				const auto& fs = vr::GetOpenXRSystem()->GetFrameState();
+				if (fs.shouldRender && def.numVREyes == 2 && fs.eyeWidth > 0) {
+					vrEyesWanted = true;
+					// Drawn smaller when the GPU cannot keep up; scaled up to the
+					// headset's image in Flip.
+					const float scale = VRResolutionScale();
+					EnsureRenderSize(std::max(16, static_cast<int>(fs.eyeWidth * scale)),
+					                 std::max(16, static_cast<int>(fs.eyeHeight * scale)));
+				}
+#endif
+				vrHeadSceneDef = def;
+				BuildProjectionMatrix();
+				BuildView();
+				BuildFrustrum();
+				return;
+			}
+			// Back from the headset, the 3D goes back to the window's size.
+			if (vrRenderExtent.width > 0) {
+				vrRenderExtent = VkExtent2D{0, 0};
+				RecreateRenderTargets();
+			}
+
 			BuildProjectionMatrix();
 			BuildView();
 			BuildFrustrum();
@@ -1066,17 +1224,35 @@ namespace spades {
 
 		bool VulkanRenderer::UsesFullDepthPrepass() const { return ambientOcclusion != nullptr; }
 
+		bool VulkanRenderer::SceneResolvesInPass() {
+			// Asked for (r_resolveInPass), multisampled, and no depth read after the
+			// scene pass: no water drawn after it, no soft particles, no depth
+			// pre-pass, and no filter that reads the depth.
+			if (!(int)r_resolveInPass || device->GetSampleCount() == VK_SAMPLE_COUNT_1_BIT ||
+			    foveation > 0)
+				return false;
+			const int water = (int)settings.r_water;
+			if (water >= 2 || (water == 1 && !(int)r_waterInScene))
+				return false;
+			if ((int)settings.r_softParticles || (int)settings.r_fogShadow ||
+			    (int)settings.r_ssao || (int)r_depthPrepass)
+				return false;
+			return !(int)r_depthOfField && (float)r_cameraBlur <= 0.0F && !(int)r_outlines &&
+			       !(int)r_temporalAA && !(int)r_lensFlare;
+		}
+
 		void VulkanRenderer::ConfigureAmbientOcclusion() {
 			SPADES_MARK_FUNCTION();
 
 			ambientOcclusion.reset();
-			if ((int)settings.r_ssao != 0)
+			// Not in multiview: its passes are one view's
+			if ((int)settings.r_ssao != 0 && !multiview)
 				ambientOcclusion = stmp::make_unique<VulkanScreenSpaceAmbientOcclusion>(
-				  *this, device->GetMaxFramesInFlight());
+				  *this, GetFrameSlotCount());
 
 			// Every view of every frame slot reads its occlusion, or a placeholder it
 			// never reads (`SceneView::ambientOcclusion` says so)
-			for (std::size_t slot = 0; slot < device->GetMaxFramesInFlight(); slot++) {
+			for (std::size_t slot = 0; slot < GetFrameSlotCount(); slot++) {
 				for (VulkanSceneView::View view :
 				     {VulkanSceneView::View::Main, VulkanSceneView::View::Mirror}) {
 					VulkanImage& image = ambientOcclusion && ambientOcclusion->HasView(view)
@@ -1092,7 +1268,7 @@ namespace spades {
 		                                            VulkanSceneView::View view) {
 			SPADES_MARK_FUNCTION();
 
-			if (!ambientOcclusion || !ambientOcclusion->HasView(view))
+			if (!ambientOcclusion || !ambientOcclusion->HasView(view) || vrScopePass)
 				return;
 
 			const bool mirror = view == VulkanSceneView::View::Mirror;
@@ -1195,8 +1371,11 @@ namespace spades {
 			} else {
 				// r_scale is not latched: follow it as GL does, between frames
 				const VkExtent2D renderExtent = DesiredRenderExtent();
+				// nor do the settings that read the depth after the scene pass
 				if (static_cast<int>(renderExtent.width) != renderWidth ||
-				    static_cast<int>(renderExtent.height) != renderHeight)
+				    static_cast<int>(renderExtent.height) != renderHeight ||
+				    (framebufferManager &&
+				     framebufferManager->ResolvesInPass() != SceneResolvesInPass()))
 					RecreateRenderTargets();
 			}
 
@@ -1287,7 +1466,9 @@ namespace spades {
 			Vector3 center;
 			float radius;
 			vkLight.GetBoundingSphere(center, radius);
-			if (!SphereFrustrumCull(center, radius))
+			// In a headset frame the frustum set up so far is the head's, not an
+			// eye's; each eye pass culls its own.
+			if (!vrFrame && !SphereFrustrumCull(center, radius))
 				return;
 
 			EnsureInitialized();
@@ -1314,6 +1495,22 @@ namespace spades {
 		void VulkanRenderer::EndScene() {
 			SPADES_MARK_FUNCTION();
 			EnsureSceneStarted();
+
+			if (vrFrame) {
+				if (vrEyesWanted)
+					RenderVREyes();
+				// Whatever did not get drawn is dropped, as the window path does.
+				debugLines.clear();
+				lights.clear();
+				if (modelRenderer) modelRenderer->Clear();
+				if (spriteRenderer) spriteRenderer->Clear();
+				if (longSpriteRenderer) longSpriteRenderer->Clear();
+				// Screenshots read the window's scene, which a headset frame has not
+				// drawn.
+				sceneUsedInThisFrame = false;
+				duringSceneRendering = false;
+				return;
+			}
 
 			// StartScene failed to acquire a swapchain image: there is nothing valid
 			// to record into. Drop the frame cleanly. The frame-slot fence was not
@@ -1475,13 +1672,13 @@ namespace spades {
 				}
 			}
 
-			if (!imageRenderer) {
+			if (!Canvas2D()) {
 				// Image renderer not initialized yet
-				SPLog("DrawImage: Skipping - imageRenderer not initialized");
+				SPLog("DrawImage: Skipping - Canvas2D() not initialized");
 				return;
 			}
 
-			imageRenderer->SetImage(img);
+			Canvas2D()->SetImage(img);
 
 			Vector4 col = drawColorAlphaPremultiplied;
 			if (legacyColorPremultiply) {
@@ -1491,7 +1688,7 @@ namespace spades {
 				col.z *= col.w;
 			}
 
-			imageRenderer->Add(outTopLeft.x, outTopLeft.y, outTopRight.x, outTopRight.y,
+			Canvas2D()->Add(outTopLeft.x, outTopLeft.y, outTopRight.x, outTopRight.y,
 			                   outBottomRight.x, outBottomRight.y, outBottomLeft.x, outBottomLeft.y,
 			                   inRect.GetMinX(), inRect.GetMinY(), inRect.GetMaxX(),
 			                   inRect.GetMinY(), inRect.GetMaxX(), inRect.GetMaxY(),
@@ -1505,10 +1702,10 @@ namespace spades {
 			EnsureSceneNotStarted();
 
 			VulkanImage* img = whiteImage.GetPointerOrNull();
-			if (!img || !imageRenderer)
+			if (!img || !Canvas2D())
 				return;
 
-			imageRenderer->SetImage(img);
+			Canvas2D()->SetImage(img);
 
 			Vector4 col = drawColorAlphaPremultiplied;
 			if (legacyColorPremultiply) {
@@ -1517,7 +1714,7 @@ namespace spades {
 				col.z *= col.w;
 			}
 
-			imageRenderer->AddTriangle(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y, col.x, col.y, col.z,
+			Canvas2D()->AddTriangle(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y, col.x, col.y, col.z,
 			                           col.w);
 		}
 
@@ -1531,15 +1728,15 @@ namespace spades {
 				return; // skip fully transparent draws
 
 			VulkanImage* img = whiteImage.GetPointerOrNull();
-			if (!img || !imageRenderer)
+			if (!img || !Canvas2D())
 				return;
 
-			imageRenderer->SetImage(img);
+			Canvas2D()->SetImage(img);
 
 			// Unlike DrawFilledTriangle, the gradient colours arrive already
 			// alpha-premultiplied from the caller, so legacyColorPremultiply does
 			// not apply here — this matches GLRenderer.
-			imageRenderer->AddGradient(x0, y0, x1, y0, x1, y1, x0, y1, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F,
+			Canvas2D()->AddGradient(x0, y0, x1, y0, x1, y1, x0, y1, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F,
 			                           1.0F, 0.0F, 1.0F, color0.x, color0.y, color0.z, color0.w,
 			                           color1.x, color1.y, color1.z, color1.w, horizontal);
 		}
@@ -1567,29 +1764,29 @@ namespace spades {
 		void VulkanRenderer::BeginClippingCircle(const Vector2& center, float radius) {
 			SPADES_MARK_FUNCTION();
 			EnsureSceneNotStarted();
-			if (imageRenderer)
-				imageRenderer->SetClipCircle(center, radius);
+			if (Canvas2D())
+				Canvas2D()->SetClipCircle(center, radius);
 		}
 
 		void VulkanRenderer::EndClippingCircle() {
 			SPADES_MARK_FUNCTION();
 			EnsureSceneNotStarted();
-			if (imageRenderer)
-				imageRenderer->ClearClipCircle();
+			if (Canvas2D())
+				Canvas2D()->ClearClipCircle();
 		}
 
 		void VulkanRenderer::BeginClippingRect(const AABB2& outRect) {
 			SPADES_MARK_FUNCTION();
 			EnsureSceneNotStarted();
-			if (imageRenderer)
-				imageRenderer->SetClipRect(outRect);
+			if (Canvas2D())
+				Canvas2D()->SetClipRect(outRect);
 		}
 
 		void VulkanRenderer::EndClippingRect() {
 			SPADES_MARK_FUNCTION();
 			EnsureSceneNotStarted();
-			if (imageRenderer)
-				imageRenderer->ClearClipRect();
+			if (Canvas2D())
+				Canvas2D()->ClearClipRect();
 		}
 
 		void VulkanRenderer::FrameDone() {
@@ -1628,6 +1825,19 @@ namespace spades {
 				return;
 			}
 
+			vrCanvas = 0;
+			// A headset frame is ended here even when no scene was drawn (the main
+			// menu): the runtime is waiting on it, and the HUD panel is the menu.
+			if (IsHeadsetFrame()) {
+				FlipVRFrame();
+				vrFrame = false;
+				vrEyesWanted = false;
+				vrEyesRendered = false;
+				if (temporaryImagePool)
+					temporaryImagePool->ReleaseAll();
+				return;
+			}
+
 			if (sceneUsedInThisFrame) {
 				// Present the image (already rendered in EndScene)
 				VkSemaphore waitSemaphores[] = {renderFinishedSemaphore};
@@ -1652,6 +1862,9 @@ namespace spades {
 					frameImageUnavailable = false;
 					return;
 				}
+				// As in StartScene: this acquire may have rebuilt the swapchain.
+				if (device->GetSwapchainGeneration() != lastSwapchainGeneration)
+					RecreateSwapchainDependencies();
 
 				// Same per-image hazard guard as the scene path (see StartScene).
 				WaitForImageInFlight();
@@ -1754,7 +1967,7 @@ namespace spades {
 			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			barrier.image = srcImage->GetImage();
-			barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 
 			barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1917,11 +2130,64 @@ namespace spades {
 
 		// The 2D layer's units: the window's, whatever the render size (GL's too)
 		float VulkanRenderer::ScreenWidth() {
-			return static_cast<float>(device->ScreenWidth());
+			if (vrCanvas == 1)
+				return static_cast<float>(client::kVRWristCanvasWidth);
+			if (vrCanvas == 2 || vrCanvas == 3)
+				return static_cast<float>(EyeCanvasLayout(vrCanvas - 2).width);
+			return static_cast<float>(uiWidth);
 		}
 
 		float VulkanRenderer::ScreenHeight() {
-			return static_cast<float>(device->ScreenHeight());
+			if (vrCanvas == 1)
+				return static_cast<float>(client::kVRWristCanvasHeight);
+			if (vrCanvas == 2 || vrCanvas == 3)
+				return static_cast<float>(EyeCanvasLayout(vrCanvas - 2).height);
+			return static_cast<float>(uiHeight);
+		}
+
+		float VulkanRenderer::GetUIPixelRatio() {
+			return vrUILayout ? static_cast<float>(uiPixelRatio) : 1.0F;
+		}
+
+		bool VulkanRenderer::SetVRCanvas(int canvas) {
+			if (canvas == 0) {
+				vrCanvas = 0;
+				return true;
+			}
+			if (canvas >= 2 && canvas <= 5) {
+				// An eye's overlay, or its headset-only layer (4, 5): only once that
+				// eye's picture exists this frame.
+				const int e = (canvas - 2) % 2;
+				if (!inited || !IsHeadsetFrame() || !vrEyesRendered || !vrEyeImages[e])
+					return false;
+				auto& r = canvas < 4 ? eyeImageRenderers[e] : eyeComfortRenderers[e];
+				if (!r)
+					r = stmp::make_unique<VulkanImageRenderer>(*this);
+				r->SetSurfaceExtent(EyeCanvasLayout(e));
+				vrCanvas = canvas;
+				(canvas < 4 ? eyeCanvasUsed : eyeComfortUsed)[e] = true;
+				return true;
+			}
+			if (canvas != 1 || !inited || !IsHeadsetFrame())
+				return false;
+			client::IVRSystem* vr = client::GetVRSystem();
+			if (!vr || !vr->GetFrameState().wristShown)
+				return false;
+			if (!wristImageRenderer) {
+				wristImageRenderer = stmp::make_unique<VulkanImageRenderer>(*this);
+				wristImageRenderer->SetSurfaceExtent(
+				  {static_cast<uint32_t>(client::kVRWristCanvasWidth),
+				   static_cast<uint32_t>(client::kVRWristCanvasHeight)});
+			}
+			vrCanvas = 1;
+			wristCanvasUsed = true;
+			return true;
+		}
+
+		VkExtent2D VulkanRenderer::GetUIExtent() const {
+			if (vrUILayout)
+				return {static_cast<uint32_t>(uiWidth), static_cast<uint32_t>(uiHeight)};
+			return device->GetSwapchainExtent();
 		}
 
 		client::RendererInfo VulkanRenderer::GetRendererInfo() {
@@ -1978,6 +2244,8 @@ namespace spades {
 				mapOccupancy->GameMapChanged(x, y, z);
 			if (radiosityRenderer)
 				radiosityRenderer->GameMapChanged(x, y, z, map);
+			if (mapOccupancy)
+				mapOccupancy->GameMapChanged(x, y, z);
 			if (flatMapRenderer)
 				flatMapRenderer->GameMapChanged(x, y, z, *map);
 			if (waterRenderer)
@@ -2067,6 +2335,13 @@ namespace spades {
 		}
 
 				VkRenderPass VulkanRenderer::GetOffscreenRenderPass() const {
+		// The scope's targets are made as the eyes' are (same formats, samples
+		// and layers), so the two render passes are compatible and pipelines
+		// built for the eyes draw the scope too. Asked for the scope's own, the
+		// models rebuilt all their pipelines, after a vkDeviceWaitIdle, twice in
+		// every frame the scope was up: 10,600 times in half an hour on a Quest 2.
+		if (vrScopePass && scopeFramebufferManager)
+			return scopeFramebufferManager->GetRenderPass(); // the eyes' (swapped)
 		return framebufferManager ? framebufferManager->GetRenderPass() : renderPass;
 	}
 
@@ -2092,13 +2367,23 @@ namespace spades {
 			// Process deferred deletions at the start of each frame
 			ProcessDeferredDeletions();
 
+			// In a headset frame this runs once per eye, each into its own command
+			// buffer (see RenderVREyes). Work that belongs to the frame rather than
+			// to a view - uploads, the model shadow cascade - is done by the left
+			// eye only, whose commands run first, and the queued models, sprites
+			// and lights have to outlive the left eye for the right one to draw.
+			const bool eyePass = vrEyeIndex >= 0;
+			const bool frameWork = vrEyeIndex <= 0;
+			keepSceneLists = eyePass && !vrViewLast;
+
 			// The depth copies and resolves of the last frame are not this one's
 			if (framebufferManager)
 				framebufferManager->InvalidateDepthSamples();
 			if (depthResolveFilter)
 				depthResolveFilter->Invalidate();
 
-			VkCommandBuffer commandBuffer = commandBuffers[imageIndex];
+			VkCommandBuffer commandBuffer =
+			  eyePass ? vrEyeCommandBuffers[vrEyeIndex] : commandBuffers[imageIndex];
 
 			VkCommandBufferBeginInfo beginInfo{};
 			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2110,8 +2395,14 @@ namespace spades {
 				SPLog("Warning: Failed to begin recording command buffer");
 				return;
 			}
+			if (eyePass)
+				RecordVRTimestamp(commandBuffer, true);
+			// Foveation: the density map's contents, before the first scene pass
+			// that reads it (the eyes' and the scope's targets each have one)
+			if (framebufferManager)
+				framebufferManager->RecordDensityMapUpload(commandBuffer);
 
-			if (waterRenderer) {
+			if (waterRenderer && frameWork) {
 				waterRenderer->UploadWaveTextures(commandBuffer);
 				// Counted only for the reflections, which ask for it
 				waterRenderer->BeginOcclusionQueryFrame(
@@ -2120,7 +2411,7 @@ namespace spades {
 
 
 		// Realize map chunks BEFORE starting render pass (updates buffers outside render pass)
-		if (sceneUsedInThisFrame && mapRenderer) {
+		if (sceneUsedInThisFrame && mapRenderer && frameWork) {
 			mapRenderer->Realize();
 
 			// Insert memory barrier to ensure host writes are visible to vertex shader reads
@@ -2142,19 +2433,19 @@ namespace spades {
 		}
 
 		// Update map shadow heightmap texture (incremental updates from block changes)
-		if (sceneUsedInThisFrame && mapShadowRenderer) {
+		if (sceneUsedInThisFrame && mapShadowRenderer && frameWork) {
 			mapShadowRenderer->Update(commandBuffer, currentFrameSlot);
 		}
 
 		// Upload any per-block ambient occlusion chunks that the background
 		// dispatch finished computing this frame.
-		if (sceneUsedInThisFrame && ambientShadowRenderer) {
+		if (sceneUsedInThisFrame && ambientShadowRenderer && frameWork) {
 			ambientShadowRenderer->Update(commandBuffer, currentFrameSlot);
 		}
 
 		// Upload any radiosity (flat / X / Y / Z) chunks that finished
 		// recomputing on the worker thread this frame.
-		if (sceneUsedInThisFrame && radiosityRenderer) {
+		if (sceneUsedInThisFrame && radiosityRenderer && frameWork) {
 			radiosityRenderer->Update(commandBuffer, currentFrameSlot);
 		}
 
@@ -2162,8 +2453,16 @@ namespace spades {
 		// models-only map driven by r_modelShadows alone — independent of r_fogShadow
 		// (the fog in-scatter uses the separate 512² map shadow). So model shadows
 		// work with fog off.
+		//
+		// The cascade and its matrices live in single buffers written while
+		// recording, so the right eye reuses the left eye's rather than
+		// rewriting them under commands that have not run yet. The eyes are
+		// centimetres apart; the cascade covers the same ground for both.
 		// No sun, no shadow to cast: at night the cascades are left out altogether.
-		if (sceneUsedInThisFrame && shadowMapRenderer && settings.r_modelShadows && GetSunlight() > 0.0F) {
+		if (!frameWork) {
+			// right eye: keep the left eye's cascade
+		} else if (sceneUsedInThisFrame && shadowMapRenderer && settings.r_modelShadows &&
+		           GetSunlight() > 0.0F) {
 			shadowMapRenderer->Render(commandBuffer);
 		} else if (shadowMapRenderer) {
 			// Cascade not rendered this frame: keep the sampling UBO marked disabled
@@ -2182,7 +2481,8 @@ namespace spades {
 		}
 
 		// Render mirror pass for water reflections (r_water >= 2)
-		if (sceneUsedInThisFrame && framebufferManager && waterRenderer && (int)settings.r_water >= 2) {
+		if (sceneUsedInThisFrame && framebufferManager && waterRenderer && (int)settings.r_water >= 2 &&
+		    !vrScopePass) {
 			renderingMirror = true;
 
 			// Save original matrices
@@ -2275,7 +2575,7 @@ namespace spades {
 			mirrorBarriers[0].subresourceRange.baseMipLevel = 0;
 			mirrorBarriers[0].subresourceRange.levelCount = 1;
 			mirrorBarriers[0].subresourceRange.baseArrayLayer = 0;
-			mirrorBarriers[0].subresourceRange.layerCount = 1;
+			mirrorBarriers[0].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 			mirrorBarriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 			mirrorBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2289,7 +2589,7 @@ namespace spades {
 			mirrorBarriers[1].subresourceRange.baseMipLevel = 0;
 			mirrorBarriers[1].subresourceRange.levelCount = 1;
 			mirrorBarriers[1].subresourceRange.baseArrayLayer = 0;
-			mirrorBarriers[1].subresourceRange.layerCount = 1;
+			mirrorBarriers[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 			mirrorBarriers[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			mirrorBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2421,9 +2721,19 @@ namespace spades {
 			// after water). Drawn here in the order particles -> long sprites -> debug.
 			// When the water pass will run, defer them to it (same render pass, the
 			// pipelines are render-pass-compatible); otherwise draw them here.
-			const bool willRenderWater = (int)settings.r_water > 0 && waterRenderer && framebufferManager;
+			const bool willRenderWater =
+			  !vrScopePass && (int)settings.r_water > 0 && waterRenderer && framebufferManager;
+			// The water in this pass, reading no copy of the scene (r_waterInScene):
+			// no second pass, and the overlays follow it here. The scope's view
+			// too: after a pass resolved in itself (r_resolveInPass) the water's
+			// own pass would load a scene never stored, and resolve that over
+			// the picture (the scope all black, testers' report).
+			const bool waterInScene = (int)settings.r_water > 0 && waterRenderer &&
+			                          framebufferManager && waterRenderer->IsInScene();
+			if (waterInScene)
+				waterRenderer->RenderSunlightPass(commandBuffer);
 
-			if (!willRenderWater) {
+			if (!willRenderWater || waterInScene) {
 				// Ahead of the transparent overlays, as in GL, so smoke and tracers
 				// stay on top of a reveal rather than under it.
 				RenderXRayPass(commandBuffer);
@@ -2433,7 +2743,8 @@ namespace spades {
 				if (longSpriteRenderer)
 					longSpriteRenderer->Render(commandBuffer, currentFrameSlot);
 				RenderDebugLines(commandBuffer);
-				debugLines.clear();
+				if (!keepSceneLists)
+					debugLines.clear();
 			}
 
 			// End offscreen render pass (scene without water is now complete)
@@ -2450,8 +2761,9 @@ namespace spades {
 			// depth-reading post filters (all via GetResolvedDepthImage()). The raw
 			// multisampled depth is left in SHADER_READ_ONLY, so the per-branch depth
 			// barriers below are skipped under MSAA.
+			// Not when the pass resolved itself: nothing reads the depth then.
 			const bool msaaScene = framebufferManager->IsMSAA();
-			if (msaaScene && depthResolveFilter) {
+			if (msaaScene && depthResolveFilter && !framebufferManager->ResolvesInPass()) {
 				VkImageMemoryBarrier dRead{};
 				dRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 				dRead.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -2459,7 +2771,7 @@ namespace spades {
 				dRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				dRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				dRead.image = offscreenDepth->GetImage();
-				dRead.subresourceRange = {DepthStencilBarrierAspects(offscreenDepth->GetFormat()), 0, 1, 0, 1};
+				dRead.subresourceRange = {DepthStencilBarrierAspects(offscreenDepth->GetFormat()), 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				dRead.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 				dRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				vkCmdPipelineBarrier(commandBuffer,
@@ -2493,7 +2805,7 @@ namespace spades {
 				barriers[0].subresourceRange.baseMipLevel = 0;
 				barriers[0].subresourceRange.levelCount = 1;
 				barriers[0].subresourceRange.baseArrayLayer = 0;
-				barriers[0].subresourceRange.layerCount = 1;
+				barriers[0].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				barriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 				barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2507,7 +2819,7 @@ namespace spades {
 				barriers[1].subresourceRange.baseMipLevel = 0;
 				barriers[1].subresourceRange.levelCount = 1;
 				barriers[1].subresourceRange.baseArrayLayer = 0;
-				barriers[1].subresourceRange.layerCount = 1;
+				barriers[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				barriers[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 				barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2530,10 +2842,10 @@ namespace spades {
 			// Clear transparent buffers once they've been drawn. Non-soft particles
 			// drawn in the offscreen pass (no water) are cleared here; soft particles
 			// and the water-deferred buffers are cleared after they're drawn below.
-			if (spriteRenderer && !useSoftParticles && !willRenderWater) {
+			if (spriteRenderer && !useSoftParticles && !willRenderWater && !keepSceneLists) {
 				spriteRenderer->Clear();
 			}
-			if (longSpriteRenderer && !willRenderWater) {
+			if (longSpriteRenderer && !willRenderWater && !keepSceneLists) {
 				longSpriteRenderer->Clear();
 			}
 
@@ -2542,7 +2854,7 @@ namespace spades {
 			// (see CopySceneForWaterSampling / ResolveMirrorColor
 			// and the GetWater*() accessors), and refraction depth reuses the scene's
 			// resolved depth.
-			bool waterEnabled = (int)settings.r_water > 0 && waterRenderer;
+			bool waterEnabled = (int)settings.r_water > 0 && waterRenderer && !waterInScene;
 
 			// Copy scene to screen copy images for water refraction sampling
 			// (water renders to the same framebuffer, so it can't sample from it directly)
@@ -2565,7 +2877,7 @@ namespace spades {
 				backToAttachment[0].subresourceRange.baseMipLevel = 0;
 				backToAttachment[0].subresourceRange.levelCount = 1;
 				backToAttachment[0].subresourceRange.baseArrayLayer = 0;
-				backToAttachment[0].subresourceRange.layerCount = 1;
+				backToAttachment[0].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				backToAttachment[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				backToAttachment[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
@@ -2579,7 +2891,7 @@ namespace spades {
 				backToAttachment[1].subresourceRange.baseMipLevel = 0;
 				backToAttachment[1].subresourceRange.levelCount = 1;
 				backToAttachment[1].subresourceRange.baseArrayLayer = 0;
-				backToAttachment[1].subresourceRange.layerCount = 1;
+				backToAttachment[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				backToAttachment[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				backToAttachment[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
@@ -2630,15 +2942,16 @@ namespace spades {
 					if (longSpriteRenderer)
 						longSpriteRenderer->Render(commandBuffer, currentFrameSlot);
 					RenderDebugLines(commandBuffer);
-					debugLines.clear();
+					if (!keepSceneLists)
+						debugLines.clear();
 				}
 
 				vkCmdEndRenderPass(commandBuffer);
 
 				// Clear the deferred transparent buffers now that they've been drawn.
-				if (!useSoftParticles && spriteRenderer)
+				if (!useSoftParticles && spriteRenderer && !keepSceneLists)
 					spriteRenderer->Clear();
-				if (longSpriteRenderer)
+				if (longSpriteRenderer && !keepSceneLists)
 					longSpriteRenderer->Clear();
 
 				// Transition color and depth back to SHADER_READ_ONLY for the post-process chain.
@@ -2653,7 +2966,7 @@ namespace spades {
 				waterPostBarriers[0].subresourceRange.baseMipLevel = 0;
 				waterPostBarriers[0].subresourceRange.levelCount = 1;
 				waterPostBarriers[0].subresourceRange.baseArrayLayer = 0;
-				waterPostBarriers[0].subresourceRange.layerCount = 1;
+				waterPostBarriers[0].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				waterPostBarriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 				waterPostBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2667,7 +2980,7 @@ namespace spades {
 				waterPostBarriers[1].subresourceRange.baseMipLevel = 0;
 				waterPostBarriers[1].subresourceRange.levelCount = 1;
 				waterPostBarriers[1].subresourceRange.baseArrayLayer = 0;
-				waterPostBarriers[1].subresourceRange.layerCount = 1;
+				waterPostBarriers[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 				waterPostBarriers[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 				waterPostBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2682,7 +2995,7 @@ namespace spades {
 			// model list to survive past the offscreen pass when water is enabled.
 			// `lights` survives further still: the lens flare filter reads it for
 			// r_lensFlareDynamic after the post-process chain.
-			if (modelRenderer) {
+			if (modelRenderer && !keepSceneLists) {
 				modelRenderer->Clear();
 			}
 
@@ -2709,7 +3022,7 @@ namespace spades {
 				toColor.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toColor.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toColor.image = offscreenColor->GetImage();
-				toColor.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				toColor.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				toColor.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				toColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 				vkCmdPipelineBarrier(commandBuffer,
@@ -2755,7 +3068,7 @@ namespace spades {
 				toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toRead.image = offscreenColor->GetImage();
-				toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				toRead.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 				toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				vkCmdPipelineBarrier(commandBuffer,
@@ -2763,7 +3076,8 @@ namespace spades {
 					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					0, 0, nullptr, 0, nullptr, 1, &toRead);
 
-				spriteRenderer->Clear();
+				if (!keepSceneLists)
+					spriteRenderer->Clear();
 			}
 
 			// Under MSAA, resolve the final multisampled scene colour for the
@@ -2780,144 +3094,54 @@ namespace spades {
 				offscreenDepth = framebufferManager->GetResolvedDepthImage();
 			}
 
-			// --- Post-process ping-pong setup ---
-			// currentInput: image in SHADER_READ_ONLY_OPTIMAL, consumed by each filter.
-			// currentOutput: image filters render into; each filter's render pass transitions
-			//   it UNDEFINED → COLOR_ATTACHMENT (during) → SHADER_READ_ONLY (on vkCmdEndRenderPass).
-			// After each filter: swap(currentInput, currentOutput); no explicit barrier needed
-			//   between filters because the render pass finalLayout handles SHADER_READ_ONLY for
-			//   the new currentInput, and initialLayout=UNDEFINED accepts any layout for currentOutput.
-			// The chain ping-pongs between two scratch images. It deliberately
-			// never renders INTO offscreenColor: that image is the resolved
-			// scene, i.e. the chain's own first input, the target the final
-			// result is mirrored into for screenshots, and the destination
-			// ResolveScene() writes each frame. Using it as an intermediate
-			// render target made the result depend on the PARITY of the number
-			// of active filters -- with an even count the chain ended in it,
-			// and the frame intermittently came out corrupt; removing any one
-			// filter (bloom, DoF, lens flare, or auto-exposure via r_hdr)
-			// flipped the parity and hid the problem, while disabling camera
-			// blur did not, because with a still camera that filter never runs.
-			VulkanImage* currentInput = offscreenColor.GetPointerOrNull();
+			// Multiview: the scene above was drawn once for both eyes, into a layer
+			// each. Each eye's layer is copied out and run through the post chain on
+			// its own frame slot (the filters' per-slot resources), into its own
+			// eye image, all in this one command buffer.
+			if (multiview && eyePass) {
+				if (vrScopePass) {
+					// The scope is one view (both its layers are the same): its
+					// first layer, copied out, through the ordinary chain.
+					Handle<VulkanImage> keep[2];
+					framebufferManager->ExtractView(commandBuffer, 0);
+					VulkanImage* scopeFinal =
+					  RecordPostChain(commandBuffer, framebufferManager->GetResolvedColorImage(),
+					                  eyePass, keep[0], keep[1]);
+					RecordVREyeOutput(commandBuffer, scopeFinal);
+					framebufferManager->EndExtractedView();
+				} else {
+					RecordMultiviewPostChain(commandBuffer);
+				}
+				if (!keepSceneLists)
+					lights.clear();
+				vkEndCommandBuffer(commandBuffer);
+				return;
+			}
+
+			// A flat frame under multiview (the headset asleep): the scene was drawn
+			// into both layers alike; the chain reads the first, copied out.
+			if (multiview) {
+				framebufferManager->ExtractView(commandBuffer, 0);
+				offscreenColor = framebufferManager->GetResolvedColorImage();
+			}
+
+			// The post-process chain, from the resolved scene to the final picture.
+			// Its own function so a multiview frame can run it once per eye.
 			Handle<VulkanImage> ppTempImage, ppTempImage2;
-			if (temporaryImagePool && framebufferManager) {
-				ppTempImage = temporaryImagePool->Acquire(
-					static_cast<uint32_t>(renderWidth),
-					static_cast<uint32_t>(renderHeight),
-					framebufferManager->GetMainColorFormat()
-				);
-				ppTempImage2 = temporaryImagePool->Acquire(
-					static_cast<uint32_t>(renderWidth),
-					static_cast<uint32_t>(renderHeight),
-					framebufferManager->GetMainColorFormat()
-				);
+			VulkanImage* currentInput =
+			  RecordPostChain(commandBuffer, offscreenColor, eyePass, ppTempImage, ppTempImage2);
+			framebufferManager->EndExtractedView();
+
+			if (!keepSceneLists)
+				lights.clear();
+
+			// A headset eye ends here: its picture goes to the headset, not the
+			// window, and the 2D layer is drawn once for both eyes in Flip.
+			if (eyePass) {
+				RecordVREyeOutput(commandBuffer, currentInput);
+				vkEndCommandBuffer(commandBuffer);
+				return;
 			}
-			VulkanImage* currentOutput = ppTempImage.GetPointerOrNull();
-
-			// Advance the ping-pong after a filter has run. The just-written
-			// image becomes the next input; the next output is whichever
-			// scratch image is not now the input, so offscreenColor is only
-			// ever read.
-			VulkanImage* const ppA = ppTempImage.GetPointerOrNull();
-			VulkanImage* const ppB = ppTempImage2.GetPointerOrNull();
-			auto advanceChain = [&]() {
-				currentInput = currentOutput;
-				currentOutput = (currentInput == ppA) ? ppB : ppA;
-			};
-
-			// Order matches GL (GLRenderer.cpp:922-1037):
-			//   Fog2 → DoF → Bloom → FXAA → LensFlare → AutoExposure(+tonemap)
-			// AutoExposure runs LAST so its histogram samples the fully painted
-			// scene (in-scattered sky, bloom, sun glare, etc.). Running it first
-			// would sample the bare scene where the sky is still black (Sky.frag
-			// is skipped under r_fogShadow>=1), causing the gain to clamp high
-			// and the whole frame to come out over-bright.
-
-			// Fog shadow / atmospheric in-scatter
-			if ((int)settings.r_fogShadow && fogFilter && mapShadowRenderer && currentInput && currentOutput) {
-				fogFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// Depth of Field
-			if ((int)r_depthOfField && depthOfFieldFilter && currentInput && currentOutput) {
-				const client::SceneDefinition& def = GetSceneDef();
-				if (def.depthOfFieldFocalLength > 0.0f || def.blurVignette > 0.0f) {
-					depthOfFieldFilter->Filter(commandBuffer, currentInput, currentOutput);
-					advanceChain();
-				}
-			}
-
-			// Camera motion blur (+ radial blur). GL order: DoF -> CameraBlur
-			// -> Bloom. Apply() returns false when skipped (no motion), in
-			// which case currentInput passes through unchanged.
-			{
-				const client::SceneDefinition& def = GetSceneDef();
-				if ((float)r_cameraBlur > 0.0f && !def.denyCameraBlur && cameraBlurFilter &&
-				    currentInput && currentOutput) {
-					float intensity = std::min((float)r_cameraBlur * 0.2f, 1.0f);
-					if (cameraBlurFilter->Apply(commandBuffer, currentInput, currentOutput,
-					                            intensity, def.radialBlur))
-						advanceChain();
-				}
-			}
-
-			// Screen-space cavity / silhouette outline. GL draws its outlines into
-			// the scene, so every filter after this one, temporal AA first, takes
-			// them as part of it: drawn after temporal AA, the outlines would follow
-			// the jittered depth's edges from frame to frame and crawl. Reads the
-			// offscreen depth attachment that the fog / soft-particle path already
-			// transitions to SHADER_READ_ONLY above; takes its own distance fade so
-			// it works whether or not the fog filter is enabled / correct.
-			if ((int)r_outlines && cavityOutlineFilter && currentInput && currentOutput) {
-				cavityOutlineFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// Temporal AA, after the camera blur and before the bloom as in GL
-			if ((int)r_temporalAA && temporalAAFilter && currentInput && currentOutput) {
-				temporalAAFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// Bloom
-			if ((int)settings.r_bloom && bloomFilter && currentInput && currentOutput) {
-				bloomFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// FXAA
-			if ((int)r_fxaa && fxaaFilter && currentInput && currentOutput) {
-				fxaaFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// Sun lens flare. Runs after FXAA (so the flare quads aren't
-			// smeared by anti-aliasing) and before auto-exposure (so the
-			// bright sun contributes to the histogram, mirroring GL).
-			if ((int)r_lensFlare && lensFlareFilter && currentInput && currentOutput) {
-				lensFlareFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			// Auto-exposure + tonemap (HDR only) — runs LAST, sampling the
-			// fully composed scene to compute its gain.
-			if ((int)settings.r_hdr && autoExposureFilter && currentInput && currentOutput) {
-				autoExposureFilter->Filter(commandBuffer, currentInput, currentOutput, lastDt);
-				advanceChain();
-			}
-
-			// Colour correction: white-balance tint, saturation desat,
-			// ACES filmic tonemap, enhancement smoothstep. Mirrors GL's
-			// GLColorCorrectionFilter and is the actual HDR compression
-			// step — without it the scene retains its full linear range
-			// and a saturated fog-tinted cast.
-			if ((int)r_colorCorrection && colorCorrectionFilter && currentInput && currentOutput) {
-				colorCorrectionFilter->Filter(commandBuffer, currentInput, currentOutput);
-				advanceChain();
-			}
-
-			lights.clear();
 
 			// --- Resample + blit final post-process result to swapchain ---
 			// r_scaleFilter: 0 = nearest, 1 = bilinear (blit filter),
@@ -2960,7 +3184,7 @@ namespace spades {
 			barrier1.subresourceRange.baseMipLevel = 0;
 			barrier1.subresourceRange.levelCount = 1;
 			barrier1.subresourceRange.baseArrayLayer = 0;
-			barrier1.subresourceRange.layerCount = 1;
+			barrier1.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 			barrier1.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			barrier1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -2981,7 +3205,7 @@ namespace spades {
 			barrier2.subresourceRange.baseMipLevel = 0;
 			barrier2.subresourceRange.levelCount = 1;
 			barrier2.subresourceRange.baseArrayLayer = 0;
-			barrier2.subresourceRange.layerCount = 1;
+			barrier2.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 			barrier2.srcAccessMask = 0;
 			barrier2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -3038,7 +3262,7 @@ namespace spades {
 				toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toDst.image = offscreenColor->GetImage();
-				toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				toDst.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 				vkCmdPipelineBarrier(commandBuffer,
@@ -3064,7 +3288,7 @@ namespace spades {
 				toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				toRead.image = offscreenColor->GetImage();
-				toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 				toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				vkCmdPipelineBarrier(commandBuffer,
@@ -3099,6 +3323,12 @@ namespace spades {
 				0, 0, nullptr, 0, nullptr, 1, &barrier2);
 		}
 
+		// An eye pass with nothing to draw never reaches the window's UI pass.
+		if (eyePass) {
+			vkEndCommandBuffer(commandBuffer);
+			return;
+		}
+
 		// Begin swapchain render pass for 2D UI rendering.
 		// Scene frames LOAD the blitted scene colour (swapchain already in
 		// COLOR_ATTACHMENT_OPTIMAL, no clear needed); 2D-only frames CLEAR the
@@ -3130,12 +3360,260 @@ namespace spades {
 
 		// Flush image renderer to record 2D drawing commands (UI)
 		if (imageRenderer) {
-			imageRenderer->Flush(commandBuffer, imageIndex);
+			imageRenderer->Flush(commandBuffer, imageIndex, device->GetSwapchainExtent());
 		}
 
 		vkCmdEndRenderPass(commandBuffer);
 
 			vkEndCommandBuffer(commandBuffer);
+		}
+
+		std::vector<VulkanRenderer::PostStep> VulkanRenderer::BuildPostSteps(bool eyePass) {
+			std::vector<PostStep> steps;
+			auto add = [&](VulkanPostProcessFilter* f,
+			               std::function<bool(VkCommandBuffer, VulkanImage*, VulkanImage*)> run) {
+				steps.push_back({f && f->SupportsLayers(), std::move(run)});
+			};
+
+			// Order matches GL (GLRenderer.cpp:922-1037):
+			//   Fog2 -> DoF -> CameraBlur -> Outlines -> TAA -> Bloom -> FXAA ->
+			//   LensFlare -> AutoExposure(+tonemap) -> ColorCorrection
+			// AutoExposure runs late so its histogram samples the fully painted
+			// scene (in-scattered sky, bloom, sun glare, etc.). Running it first
+			// would sample the bare scene where the sky is still black (Sky.frag
+			// is skipped under r_fogShadow>=1), causing the gain to clamp high
+			// and the whole frame to come out over-bright.
+
+			// Fog shadow / atmospheric in-scatter
+			if ((int)settings.r_fogShadow && fogFilter && mapShadowRenderer)
+				add(fogFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					fogFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// Depth of Field
+			if ((int)r_depthOfField && depthOfFieldFilter) {
+				const client::SceneDefinition& def = GetSceneDef();
+				if (def.depthOfFieldFocalLength > 0.0f || def.blurVignette > 0.0f)
+					add(depthOfFieldFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+						depthOfFieldFilter->Filter(c, i, o);
+						return true;
+					});
+			}
+
+			// Camera motion blur (+ radial blur). Apply() returns false when skipped
+			// (no motion), in which case the input passes through unchanged.
+			{
+				const client::SceneDefinition& def = GetSceneDef();
+				if ((float)r_cameraBlur > 0.0f && !def.denyCameraBlur && cameraBlurFilter) {
+					const float intensity = std::min((float)r_cameraBlur * 0.2f, 1.0f);
+					const float radial = def.radialBlur;
+					add(cameraBlurFilter.get(),
+					    [this, intensity, radial](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+						    return cameraBlurFilter->Apply(c, i, o, intensity, radial);
+					    });
+				}
+			}
+
+			// Screen-space cavity / silhouette outline. GL draws its outlines into
+			// the scene, so every filter after this one, temporal AA first, takes
+			// them as part of it: drawn after temporal AA, the outlines would follow
+			// the jittered depth's edges from frame to frame and crawl.
+			if ((int)r_outlines && cavityOutlineFilter)
+				add(cavityOutlineFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					cavityOutlineFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// Temporal AA, after the camera blur and before the bloom as in GL. Not
+			// in a headset yet: its history is one view's, and the two eyes would
+			// blend each other's.
+			if ((int)r_temporalAA && temporalAAFilter && !eyePass)
+				add(temporalAAFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					temporalAAFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// Bloom
+			if ((int)settings.r_bloom && bloomFilter)
+				add(bloomFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					bloomFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// FXAA
+			if ((int)r_fxaa && fxaaFilter)
+				add(fxaaFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					fxaaFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// Sun lens flare, after FXAA (so the flare quads aren't smeared) and
+			// before auto-exposure (so the bright sun counts in the histogram). Not
+			// in a headset: a lens flare is a camera's, drawn over the picture, and
+			// in a headset it sits on the eye.
+			if ((int)r_lensFlare && lensFlareFilter && !eyePass)
+				add(lensFlareFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					lensFlareFilter->Filter(c, i, o);
+					return true;
+				});
+
+			// Auto-exposure + tonemap (HDR only), sampling the fully painted scene.
+			if ((int)settings.r_hdr && autoExposureFilter)
+				add(autoExposureFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					autoExposureFilter->Filter(c, i, o, lastDt);
+					return true;
+				});
+
+			// Colour correction: white-balance tint, saturation desat, ACES filmic
+			// tonemap, enhancement smoothstep (GLColorCorrectionFilter): the actual
+			// HDR compression step.
+			if ((int)r_colorCorrection && colorCorrectionFilter)
+				add(colorCorrectionFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
+					colorCorrectionFilter->Filter(c, i, o);
+					return true;
+				});
+			return steps;
+		}
+
+		VulkanImage* VulkanRenderer::RecordPostChain(VkCommandBuffer commandBuffer,
+		                                             Handle<VulkanImage> offscreenColor, bool eyePass,
+		                                             Handle<VulkanImage>& ppTempImage,
+		                                             Handle<VulkanImage>& ppTempImage2) {
+			// The chain ping-pongs between two scratch images. It deliberately
+			// never renders INTO offscreenColor: that image is the resolved
+			// scene, i.e. the chain's own first input, the target the final
+			// result is mirrored into for screenshots, and the destination
+			// ResolveScene() writes each frame. Using it as an intermediate
+			// render target made the result depend on the PARITY of the number
+			// of active filters -- with an even count the chain ended in it,
+			// and the frame intermittently came out corrupt.
+			VulkanImage* currentInput = offscreenColor.GetPointerOrNull();
+			if (temporaryImagePool && framebufferManager) {
+				ppTempImage = temporaryImagePool->Acquire(static_cast<uint32_t>(renderWidth),
+				                                          static_cast<uint32_t>(renderHeight),
+				                                          framebufferManager->GetMainColorFormat());
+				ppTempImage2 = temporaryImagePool->Acquire(static_cast<uint32_t>(renderWidth),
+				                                           static_cast<uint32_t>(renderHeight),
+				                                           framebufferManager->GetMainColorFormat());
+			}
+			VulkanImage* const ppA = ppTempImage.GetPointerOrNull();
+			VulkanImage* const ppB = ppTempImage2.GetPointerOrNull();
+			if (!currentInput || !ppA || !ppB)
+				return currentInput;
+			for (const PostStep& step : BuildPostSteps(eyePass)) {
+				// The next output is whichever scratch image is not the input, so
+				// offscreenColor is only ever read.
+				VulkanImage* out = (currentInput == ppA) ? ppB : ppA;
+				if (step.run(commandBuffer, currentInput, out))
+					currentInput = out;
+			}
+			return currentInput;
+		}
+
+		void VulkanRenderer::SetMultiviewEye(int eye) {
+			sceneDef = vrMultiviewEyes[eye];
+			BuildProjectionMatrix();
+			BuildView();
+			BuildFrustrum();
+			currentFrameSlot = static_cast<uint32_t>(eye);
+			vrEyeIndex = eye;
+		}
+
+		void VulkanRenderer::RecordMultiviewPostChain(VkCommandBuffer cmd) {
+			// The chain for both eyes, from the two-layer scene. Filters that can
+			// (SupportsLayers) run once over both layers; the rest run once per
+			// eye, on that eye's frame slot, with its depth copied out for them.
+			// Between the two, the eyes' pictures are split out of the layers or
+			// put back into them, one copy each. r_multiviewFilters 0 runs every
+			// filter per eye (stage 2's way, and the control for each filter's
+			// layered form).
+			std::vector<PostStep> steps = BuildPostSteps(true);
+			if (!(bool)r_multiviewFilters)
+				for (PostStep& s : steps)
+					s.layers = false;
+
+			const uint32_t w = static_cast<uint32_t>(renderWidth);
+			const uint32_t h = static_cast<uint32_t>(renderHeight);
+			const VkFormat fmt = framebufferManager->GetMainColorFormat();
+			std::vector<Handle<VulkanImage>> keep; // until the commands are recorded
+			auto acquire = [&](uint32_t layers) {
+				keep.push_back(temporaryImagePool->Acquire(w, h, fmt, layers));
+				return keep.back().GetPointerOrNull();
+			};
+
+			VulkanImage* layeredA = nullptr;
+			VulkanImage* layeredB = nullptr;
+			VulkanImage* eyeA[2] = {nullptr, nullptr};
+			VulkanImage* eyeB[2] = {nullptr, nullptr};
+			VulkanImage* layered = framebufferManager->GetResolvedColorImage().GetPointerOrNull();
+			VulkanImage* eyeCur[2] = {nullptr, nullptr};
+			bool perEye = false;
+
+			auto toLayers = [&]() {
+				if (!perEye)
+					return;
+				if (!layeredA) {
+					layeredA = acquire(2);
+					layeredB = acquire(2);
+				}
+				VulkanImage* dst = layered == layeredA ? layeredB : layeredA;
+				for (int e = 0; e < 2; e++)
+					CopyImageLayer(cmd, eyeCur[e], 0, dst, static_cast<uint32_t>(e));
+				layered = dst;
+				perEye = false;
+			};
+			auto toEyes = [&]() {
+				if (perEye)
+					return;
+				for (int e = 0; e < 2; e++) {
+					if (!eyeA[e]) {
+						eyeA[e] = acquire(1);
+						eyeB[e] = acquire(1);
+					}
+					VulkanImage* dst = eyeCur[e] == eyeA[e] ? eyeB[e] : eyeA[e];
+					CopyImageLayer(cmd, layered, static_cast<uint32_t>(e), dst, 0);
+					eyeCur[e] = dst;
+				}
+				perEye = true;
+			};
+
+			size_t i = 0;
+			while (i < steps.size()) {
+				if (steps[i].layers) {
+					toLayers();
+					SetMultiviewEye(0); // both eyes' pass draws from slot 0
+					if (!layeredA) {
+						layeredA = acquire(2);
+						layeredB = acquire(2);
+					}
+					VulkanImage* out = layered == layeredA ? layeredB : layeredA;
+					if (steps[i].run(cmd, layered, out))
+						layered = out;
+					i++;
+					continue;
+				}
+				size_t j = i;
+				while (j < steps.size() && !steps[j].layers)
+					j++;
+				toEyes();
+				for (int e = 0; e < 2; e++) {
+					SetMultiviewEye(e);
+					framebufferManager->ExtractView(cmd, e, false); // this eye's depth
+					for (size_t k = i; k < j; k++) {
+						VulkanImage* out = eyeCur[e] == eyeA[e] ? eyeB[e] : eyeA[e];
+						if (steps[k].run(cmd, eyeCur[e], out))
+							eyeCur[e] = out;
+					}
+					framebufferManager->EndExtractedView();
+				}
+				i = j;
+			}
+			toEyes();
+			for (int e = 0; e < 2; e++) {
+				SetMultiviewEye(e);
+				RecordVREyeOutput(cmd, eyeCur[e]);
+			}
 		}
 
 		void VulkanRenderer::CreateSkyPipeline() {
@@ -3273,9 +3751,12 @@ namespace spades {
 			pushConstantRange.offset = 0;
 			pushConstantRange.size = sizeof(SkyPushConstants);
 
+			std::vector<VkDescriptorSetLayout> skyLayoutList;
+			AppendViewSetLayout(skyLayoutList); // multiview: set 0
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-			pipelineLayoutInfo.setLayoutCount = 0;
+			pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(skyLayoutList.size());
+			pipelineLayoutInfo.pSetLayouts = skyLayoutList.empty() ? nullptr : skyLayoutList.data();
 			pipelineLayoutInfo.pushConstantRangeCount = 1;
 			pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -3549,8 +4030,9 @@ namespace spades {
 			}
 
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline);
+			BindViewSet(commandBuffer, skyPipelineLayout, 0);
 
-			// Push constants: fogColor, viewAxisFront, viewAxisUp, viewAxisSide, fovX, fovY
+			// Push constants: fogColor, viewAxisFront, viewAxisUp, viewAxisSide, edge tangents
 			SkyPushConstants pushConstants;
 
 			// Sky uses the actual fog color, not the shadow-modified one.
@@ -3576,8 +4058,13 @@ namespace spades {
 			pushConstants.viewAxisSide[1] = sceneDef.viewAxis[0].y;
 			pushConstants.viewAxisSide[2] = sceneDef.viewAxis[0].z;
 
-			pushConstants.fovX = sceneDef.fovX;
-			pushConstants.fovY = sceneDef.fovY;
+			{
+				const client::FovTangents f = sceneDef.GetFovTangents();
+				pushConstants.tanLeft = f.left;
+				pushConstants.tanRight = f.right;
+				pushConstants.tanDown = f.down;
+				pushConstants.tanUp = f.up;
+			}
 
 			vkCmdPushConstants(
 				commandBuffer,
@@ -3717,8 +4204,12 @@ namespace spades {
 			pcRange.offset = 0;
 			pcRange.size = sizeof(Matrix4);
 
+			std::vector<VkDescriptorSetLayout> lineLayoutList;
+			AppendViewSetLayout(lineLayoutList); // multiview: set 0
 			VkPipelineLayoutCreateInfo layoutInfo{};
 			layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			layoutInfo.setLayoutCount = static_cast<uint32_t>(lineLayoutList.size());
+			layoutInfo.pSetLayouts = lineLayoutList.empty() ? nullptr : lineLayoutList.data();
 			layoutInfo.pushConstantRangeCount = 1;
 			layoutInfo.pPushConstantRanges = &pcRange;
 
@@ -3805,6 +4296,7 @@ namespace spades {
 			vertexBuffer->UpdateData(vertices.data(), vertices.size() * sizeof(LineVertex));
 
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, debugLinePipeline);
+			BindViewSet(commandBuffer, debugLinePipelineLayout, 0);
 
 			VkViewport viewport{0.0f, (float)renderHeight, (float)renderWidth, -(float)renderHeight, 0.0f, 1.0f};
 			vkCmdSetViewport(commandBuffer, 0, 1, &viewport);

@@ -19,6 +19,7 @@
  */
 
 #include "VulkanDepthResolveFilter.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanFramebufferManager.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
@@ -63,6 +64,12 @@ namespace spades {
 			if (resolvePipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, resolvePipeline, nullptr);
 			if (stencilResolvePipeline != VK_NULL_HANDLE)
 				vkDestroyPipeline(dev, stencilResolvePipeline, nullptr);
+			if (resolvePipelineMV != VK_NULL_HANDLE) vkDestroyPipeline(dev, resolvePipelineMV, nullptr);
+			if (ppRenderPassMV != VK_NULL_HANDLE) vkDestroyRenderPass(dev, ppRenderPassMV, nullptr);
+			if (stencilResolvePipelineMV != VK_NULL_HANDLE)
+				vkDestroyPipeline(dev, stencilResolvePipelineMV, nullptr);
+			if (stencilRenderPassMV != VK_NULL_HANDLE)
+				vkDestroyRenderPass(dev, stencilRenderPassMV, nullptr);
 			if (resolveLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, resolveLayout, nullptr);
 			if (msDepthDSL != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, msDepthDSL, nullptr);
 			if (depthSampler != VK_NULL_HANDLE) vkDestroySampler(dev, depthSampler, nullptr);
@@ -94,6 +101,15 @@ namespace spades {
 			    VK_IMAGE_LAYOUT_UNDEFINED,
 			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			    &dep);
+			if (renderer.IsMultiview()) {
+				ppRenderPassMV = CreateSimpleColorRenderPass(
+				    dev, kResolvedDepthFormat, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+				    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &dep, 0x3);
+				stencilRenderPassMV = CreateSimpleColorRenderPass(
+				    dev, VulkanFramebufferManager::kSampledStencilFormat,
+				    VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+				    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &dep, 0x3);
+			}
 
 			VkSamplerCreateInfo si{};
 			si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -133,6 +149,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -158,6 +175,13 @@ namespace spades {
 			  "Shaders/Vulkan/PostFilters/DepthResolve.vk.fs.spv", ppRenderPass);
 			stencilResolvePipeline = CreateResolvePipeline(
 			  "Shaders/Vulkan/PostFilters/StencilResolve.vk.fs.spv", stencilRenderPass);
+			// Multiview: each eye's samples from its own layer.
+			if (ppRenderPassMV != VK_NULL_HANDLE) {
+				resolvePipelineMV = CreateResolvePipeline(
+				  "Shaders/Vulkan/PostFilters/DepthResolve.vk.fs.mv.spv", ppRenderPassMV);
+				stencilResolvePipelineMV = CreateResolvePipeline(
+				  "Shaders/Vulkan/PostFilters/StencilResolve.vk.fs.mv.spv", stencilRenderPassMV);
+			}
 		}
 
 		VkPipeline VulkanDepthResolveFilter::CreateResolvePipeline(const char* fragmentShader,
@@ -255,14 +279,15 @@ namespace spades {
 		}
 
 		VulkanDepthResolveFilter::Target&
-		VulkanDepthResolveFilter::GetTarget(VkImageView sourceView, bool stencil,
+		VulkanDepthResolveFilter::GetTarget(VkImageView sourceView, bool stencil, bool layered,
 		                                    VulkanImage* output) {
 			for (Target& t : targets)
-				if (t.output == output && t.sourceView == sourceView)
+				if (t.output == output && t.sourceView == sourceView && t.layered == layered)
 					return t;
 
-			// The scene's depth and stencil and the mirror's depth: anything past
-			// that means targets were replaced without `ReleaseTargets`
+			// The scene's and the scope view's depths and stencils, the mirror's
+			// depth: anything past that means targets were replaced without
+			// `ReleaseTargets`
 			if (targets.size() >= kMaxTargets)
 				SPRaise("Too many depth-resolve targets (%u)", (unsigned)targets.size());
 
@@ -270,12 +295,13 @@ namespace spades {
 			t.output = output;
 			t.sourceView = sourceView;
 			t.stencil = stencil;
+			t.layered = layered;
 			t.resolved = false;
 
 			VkImageView outputView = output->GetImageView();
 			VkFramebufferCreateInfo fbInfo{};
 			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-			fbInfo.renderPass = stencil ? stencilRenderPass : ppRenderPass;
+			fbInfo.renderPass = RenderPassFor(stencil, layered);
 			fbInfo.attachmentCount = 1;
 			fbInfo.pAttachments = &outputView;
 			fbInfo.width = output->GetWidth();
@@ -326,7 +352,10 @@ namespace spades {
 
 			// The ambient occlusion's resolve after the depth pre-pass serves what
 			// reads the depth later in the frame, unless something wrote it since
-			Target& target = GetTarget(msaaDepth->GetImageView(), false, output);
+			// Both eyes at once when given both layers (multiview).
+			const bool layered =
+			  msaaDepth->GetArrayLayers() > 1 && resolvePipelineMV != VK_NULL_HANDLE;
+			Target& target = GetTarget(msaaDepth->GetImageView(), false, layered, output);
 			if (target.resolved)
 				return;
 			target.resolved = true;
@@ -340,7 +369,15 @@ namespace spades {
 			SPAssert(msaaDepth->GetStencilImageView() != VK_NULL_HANDLE);
 
 			// Every time: unlike the depth, the stencil changes after the pre-pass
-			Draw(cmd, GetTarget(msaaDepth->GetStencilImageView(), true, output));
+			const bool layered =
+			  msaaDepth->GetArrayLayers() > 1 && stencilResolvePipelineMV != VK_NULL_HANDLE;
+			Draw(cmd, GetTarget(msaaDepth->GetStencilImageView(), true, layered, output));
+		}
+
+		VkRenderPass VulkanDepthResolveFilter::RenderPassFor(bool stencil, bool layered) const {
+			if (stencil)
+				return layered ? stencilRenderPassMV : stencilRenderPass;
+			return layered ? ppRenderPassMV : ppRenderPass;
 		}
 
 		void VulkanDepthResolveFilter::Draw(VkCommandBuffer cmd, Target& target) {
@@ -350,7 +387,7 @@ namespace spades {
 
 			VkRenderPassBeginInfo rpBegin{};
 			rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-			rpBegin.renderPass = target.stencil ? stencilRenderPass : ppRenderPass;
+			rpBegin.renderPass = RenderPassFor(target.stencil, target.layered);
 			rpBegin.framebuffer = target.framebuffer;
 			rpBegin.renderArea.extent = {w, h};
 
@@ -361,8 +398,11 @@ namespace spades {
 			vkCmdSetViewport(cmd, 0, 1, &viewport);
 			vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-			                  target.stencil ? stencilResolvePipeline : resolvePipeline);
+			VkPipeline pipeline = target.stencil ? (target.layered ? stencilResolvePipelineMV
+			                                                       : stencilResolvePipeline)
+			                      : target.layered ? resolvePipelineMV
+			                                       : resolvePipeline;
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			                        resolveLayout, 0, 1, &target.set, 0, nullptr);
 

@@ -39,6 +39,7 @@ namespace spades {
 
 			IRenderer& renderer;
 			IFont* font;
+			IFont* baseFont;
 			std::vector<bool> lineUsing;
 			std::list<Entry> entries;
 
@@ -52,6 +53,9 @@ namespace spades {
 			void AddMessage(const std::string&);
 			void Update(float dt);
 			void Draw();
+			/** The font to draw in (the wrist panel's larger one), nullptr for the
+			 * view's own. */
+			void SetFont(IFont* scaledFont) { font = scaledFont ? scaledFont : baseFont; }
 		};
 	} // namespace client
 } // namespace spades

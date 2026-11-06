@@ -38,6 +38,63 @@ namespace spades {
 			ctx.ExecuteChecked();
 		}
 
+		ScriptIVRWeaponSkin::ScriptIVRWeaponSkin(asIScriptObject* obj) : obj(obj) {}
+
+		bool ScriptIVRWeaponSkin::ImplementsInterface() {
+			return obj && obj->GetObjectType()->Implements(
+			                obj->GetEngine()->GetTypeInfoByName("IVRWeaponSkin"));
+		}
+
+		void ScriptIVRWeaponSkin::SetVRHand(bool v) {
+			SPADES_MARK_FUNCTION_DEBUG();
+			static ScriptFunction func("IVRWeaponSkin", "void set_VRHand(bool)");
+			ScriptContextHandle ctx = func.Prepare();
+			int r;
+			r = ctx->SetObject((void*)obj);
+			ScriptManager::CheckError(r);
+			r = ctx->SetArgByte(0, v ? 1 : 0);
+			ScriptManager::CheckError(r);
+			ctx.ExecuteChecked();
+		}
+
+		namespace {
+			Vector3 GetVector(asIScriptObject* obj, ScriptFunction& func) {
+				ScriptContextHandle ctx = func.Prepare();
+				int r = ctx->SetObject((void*)obj);
+				ScriptManager::CheckError(r);
+				ctx.ExecuteChecked();
+				return *reinterpret_cast<Vector3*>(ctx->GetReturnObject());
+			}
+		} // namespace
+
+		Vector3 ScriptIVRWeaponSkin::GetVRSightRear() {
+			SPADES_MARK_FUNCTION_DEBUG();
+			static ScriptFunction func("IVRWeaponSkin", "Vector3 get_VRSightRear()");
+			return GetVector(obj, func);
+		}
+
+		Vector3 ScriptIVRWeaponSkin::GetVRSightFront() {
+			SPADES_MARK_FUNCTION_DEBUG();
+			static ScriptFunction func("IVRWeaponSkin", "Vector3 get_VRSightFront()");
+			return GetVector(obj, func);
+		}
+
+		Vector3 ScriptIVRWeaponSkin::GetVRReflexCenter() {
+			SPADES_MARK_FUNCTION_DEBUG();
+			static ScriptFunction func("IVRWeaponSkin", "Vector3 get_VRReflexCenter()");
+			return GetVector(obj, func);
+		}
+
+		float ScriptIVRWeaponSkin::GetVRReflexRadius() {
+			SPADES_MARK_FUNCTION_DEBUG();
+			static ScriptFunction func("IVRWeaponSkin", "float get_VRReflexRadius()");
+			ScriptContextHandle ctx = func.Prepare();
+			int r = ctx->SetObject((void*)obj);
+			ScriptManager::CheckError(r);
+			ctx.ExecuteChecked();
+			return ctx->GetReturnFloat();
+		}
+
 		class IThirdPersonToolSkinRegistrar : public ScriptObjectRegistrar {
 		public:
 			IThirdPersonToolSkinRegistrar() : ScriptObjectRegistrar("IThirdPersonToolSkin") {}
@@ -49,10 +106,19 @@ namespace spades {
 					case PhaseObjectType:
 						r = eng->RegisterInterface("IThirdPersonToolSkin");
 						manager->CheckError(r);
+						r = eng->RegisterInterface("IVRWeaponSkin");
+						manager->CheckError(r);
 						break;
 					case PhaseObjectMember:
 						r = eng->RegisterInterfaceMethod("IThirdPersonToolSkin", "void set_OriginMatrix(Matrix4)");
 						manager->CheckError(r);
+						for (const char* decl :
+						     {"void set_VRHand(bool)", "Vector3 get_VRSightRear()",
+						      "Vector3 get_VRSightFront()", "Vector3 get_VRReflexCenter()",
+						      "float get_VRReflexRadius()"}) {
+							r = eng->RegisterInterfaceMethod("IVRWeaponSkin", decl);
+							manager->CheckError(r);
+						}
 						break;
 					default: break;
 				}

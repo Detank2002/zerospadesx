@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define ZS_VIEWS_SET 1 // in place of the empty set before the lights
+#include "Multiview.glsl"
 
 /*
  Copyright (c) 2013 Fran6nd
@@ -40,6 +44,13 @@ layout(location = 1) out vec3 v_screenPosition;
 layout(location = 2) out vec3 v_viewPosition;
 layout(location = 3) out vec3 v_worldPosition;
 
+#ifdef ZS_MULTIVIEW
+#define ZS_VIEW_MODEL (zsViews.view[gl_ViewIndex] * waterMat.modelMatrix)
+#define ZS_EYE_ORIGIN zsViews.eyeOrigin[gl_ViewIndex]
+#else
+#define ZS_VIEW_MODEL waterMat.viewModelMatrix
+#define ZS_EYE_ORIGIN waterMat.viewOriginVector
+#endif
 // Fog computation from OpenGL Fog.vs
 vec4 ComputeFogDensity(float poweredLength) {
 	return vec4(min(poweredLength / (waterMat.fogDistance * waterMat.fogDistance), 1.0));
@@ -51,7 +62,7 @@ void main() {
 	// projectionViewModelMatrix and viewModelMatrix already include M, so
 	// apply them to object-space vertexPos (matches GL Water.vs).
 	v_worldPosition = (waterMat.modelMatrix * vertexPos).xyz;
-	v_viewPosition = (waterMat.viewModelMatrix * vertexPos).xyz;
+	v_viewPosition = (ZS_VIEW_MODEL * vertexPos).xyz;
 
 	gl_Position = waterMat.projectionViewModelMatrix * vertexPos;
 	v_screenPosition = gl_Position.xyw;
@@ -59,7 +70,17 @@ void main() {
 	v_screenPosition.x = (v_screenPosition.x + v_screenPosition.z) * 0.5;
 	v_screenPosition.y = (v_screenPosition.z - v_screenPosition.y) * 0.5;
 
-	vec2 horzRelativePos = v_worldPosition.xy - waterMat.viewOriginVector.xy;
+	vec2 horzRelativePos = v_worldPosition.xy - ZS_EYE_ORIGIN.xy;
 	float horzDistance = dot(horzRelativePos, horzRelativePos);
 	v_fogDensity = ComputeFogDensity(horzDistance).xyz;
+#ifdef ZS_MULTIVIEW
+	gl_Position = ZS_CORRECT(gl_Position);
+	// The screen position this eye samples the scene copy at: from its own
+	// clip position, not eye 0's. Taken before the correction, the right eye
+	// read the scene copy where the left eye sees the water, and its water
+	// showed a shifted copy of its own view, gun and all (on the Quest).
+	v_screenPosition = gl_Position.xyw;
+	v_screenPosition.x = (v_screenPosition.x + v_screenPosition.z) * 0.5;
+	v_screenPosition.y = (v_screenPosition.z - v_screenPosition.y) * 0.5;
+#endif
 }

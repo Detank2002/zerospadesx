@@ -64,12 +64,13 @@ namespace spades {
 			// Add() time has to travel with the batch instead of being device
 			// state set at call time.
 			struct BatchClip {
-				// The full-surface scissor is resolved at record time rather
-				// than stored, so a swapchain resize can never leave a stale
-				// rectangle behind.
+				// All in layout pixels (the coordinates the client draws in).
+				// They become target pixels only at record time, when the
+				// surface drawn into is known: the window, or a supersampled
+				// headset panel twice the layout's size.
 				bool hasScissor = false;
-				VkRect2D scissor{};
-				Vector2 circleCenter{0.0f, 0.0f}; // screen pixels
+				AABB2 rect;
+				Vector2 circleCenter{0.0f, 0.0f};
 				float circleRadius = 0.0f;        // <= 0: no circular clip
 			};
 
@@ -115,14 +116,21 @@ namespace spades {
 			// clip changes is preserved this way.
 			void FinishCurrentBatch();
 
-			// The whole UI surface, i.e. "no rectangular clip".
-			VkRect2D FullScissor() const;
+			// A layout of fixed size (the VR wrist panel), or {0, 0} to follow
+			// the renderer's UI extent.
+			VkExtent2D fixedExtent{0, 0};
+			VkExtent2D SurfaceExtent() const;
 
 		public:
 			VulkanImageRenderer(VulkanRenderer& r);
 			~VulkanImageRenderer();
 
-			void Flush(VkCommandBuffer commandBuffer, uint32_t frameIndex);
+			// Records the queued draws. `target` is the size of the surface being
+			// drawn into; the layout is stretched over it, so a target twice the
+			// layout draws everything at twice the resolution. {0, 0}: the same as
+			// the layout.
+			void Flush(VkCommandBuffer commandBuffer, uint32_t frameIndex,
+			           VkExtent2D target = {0, 0});
 
 			/** Drops what was queued for a frame that is not drawn */
 			void Discard();
@@ -130,6 +138,8 @@ namespace spades {
 			/** Follows a recreated swapchain, whose image count may differ: called
 			 * with the device idle, and keeps what is queued for the frame */
 			void SwapchainRecreated();
+
+			void SetSurfaceExtent(VkExtent2D extent) { fixedExtent = extent; }
 			void SetImage(VulkanImage* img);
 
 			// 2D clipping. Circle and rect cannot be nested or combined, which

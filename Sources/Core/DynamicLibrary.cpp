@@ -97,11 +97,15 @@ namespace spades {
 		handle = dlopen(fn, RTLD_LAZY);
 #ifndef __OpenBSD__
 		if (handle == nullptr && strchr(fn, '/') == nullptr && strchr(fn, '\\') == nullptr) {
-			char* baseDir = SDL_GetBasePath();
-			std::string newPath = baseDir;
-			newPath += "/";
-			newPath += fn;
-			handle = dlopen(newPath.c_str(), RTLD_LAZY);
+			// Beside the executable. Android has no such place (SDL returns
+			// null), and making a string of the null crashed the Quest build.
+			if (char* baseDir = SDL_GetBasePath()) {
+				std::string newPath = baseDir;
+				SDL_free(baseDir);
+				newPath += "/";
+				newPath += fn;
+				handle = dlopen(newPath.c_str(), RTLD_LAZY);
+			}
 		}
 #endif
 		if (handle == nullptr) {

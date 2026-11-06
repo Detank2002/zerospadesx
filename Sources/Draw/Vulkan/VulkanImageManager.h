@@ -28,6 +28,7 @@
 namespace spades {
 	class Bitmap;
 
+	class ResourceChanges;
 	namespace gui {
 		class SDLVulkanDevice;
 	}
@@ -52,6 +53,11 @@ namespace spades {
 			Handle<client::IImage> GetWhiteImage();
 
 			void ClearCache();
+			/**
+			 * Gives the cached images from a changed file their new content. The
+			 * GPU must be idle: the old images are freed.
+			 */
+			void ReloadResources(const ResourceChanges&);
 		};
 	} // namespace draw
 } // namespace spades

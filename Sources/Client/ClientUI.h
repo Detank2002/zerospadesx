@@ -39,6 +39,7 @@ namespace spades {
 		class ClientMenu;
 		class ChatLogWindow;
 		class ClientChatWindow;
+		class VRControlsWindow;
 
 		class ClientUI : public gui::IGameModeUI {
 			friend class ClientUIHelper;
@@ -55,6 +56,7 @@ namespace spades {
 			Handle<gui::ui::UIElement> activeUI;
 
 			Handle<ChatLogWindow> chatLogWindow;
+			Handle<VRControlsWindow> vrControlsWindow;
 			Handle<ClientMenu> clientMenu;
 
 			// The docked chat composer or the peek view while one of them is the active UI.
@@ -133,6 +135,8 @@ namespace spades {
 			void EnterGlobalChatWindow();
 			void EnterTeamChatWindow();
 			void EnterChatLogWindow();
+			/** The headset's controls cheat sheet; Back returns to the menu. */
+			void EnterVRControlsWindow();
 			void CloseUI();
 
 			// lm: so the chat does not have the initial chat key

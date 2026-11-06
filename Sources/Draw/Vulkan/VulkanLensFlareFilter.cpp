@@ -20,6 +20,7 @@
 
 #include "VulkanLensFlareFilter.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 
 #include <algorithm>
 #include <cmath>
@@ -249,6 +250,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -607,8 +609,13 @@ namespace spades {
 			const client::SceneDefinition& def = renderer.GetSceneDef();
 			const float outW = static_cast<float>(output->GetWidth());
 			const float outH = static_cast<float>(output->GetHeight());
-			const float fovTanX = std::tan(def.fovX * 0.5F);
-			const float fovTanY = std::tan(def.fovY * 0.5F);
+			// Half-widths and centres of the view in tangents: an off-centre view
+			// projects about its own centre.
+			const client::FovTangents fovEdges = def.GetFovTangents();
+			const float fovTanX = fovEdges.Width() * 0.5F;
+			const float fovTanY = fovEdges.Height() * 0.5F;
+			const float fovMidX = (fovEdges.right + fovEdges.left) * 0.5F;
+			const float fovMidY = (fovEdges.up + fovEdges.down) * 0.5F;
 
 			// One entry per flare: sun first, then per-light flares
 			// (mirrors GLLensFlareFilter::Draw being called once per source).
@@ -646,8 +653,8 @@ namespace spades {
 				if (!(view.z > 0.0F))
 					return;
 
-				const float glX = view.x / (view.z * fovTanX);
-				const float glY = view.y / (view.z * fovTanY);
+				const float glX = (view.x / view.z - fovMidX) / fovTanX;
+				const float glY = (view.y / view.z - fovMidY) / fovTanY;
 
 				// Beyond this the flare and every ghost it spawns are entirely
 				// off screen: the ghost placed nearest the centre scales the
@@ -857,8 +864,9 @@ namespace spades {
 				//   sunSize = (0.01, 0.01); sunSize.x *= ScreenH / ScreenW
 				float baseSzx = 0.01F;
 				const float baseSzy = 0.01F;
-				const float scrW = renderer.ScreenWidth();
-				const float scrH = renderer.ScreenHeight();
+				// The image the flare is drawn over, which in a headset is not the window.
+				const float scrW = static_cast<float>(renderer.GetRenderWidth());
+				const float scrH = static_cast<float>(renderer.GetRenderHeight());
 				if (scrW > 0.0F)
 					baseSzx *= scrH / scrW;
 

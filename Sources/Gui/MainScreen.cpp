@@ -21,16 +21,30 @@
 #include "MainScreen.h"
 #include "MainScreenHelper.h"
 #include <Client/Client.h>
+#include <Client/GameMap.h>
+#include <Client/SceneDefinition.h>
+#include <Client/VRState.h>
+#include <Core/Debug.h>
+#include <Core/MemoryStream.h>
+#include <Training/MapGen.h>
+#include <Training/VoxelMap.h>
+#include <chrono>
+#include <cmath>
 #include <Client/Fonts.h>
 #include <Client/IAudioDevice.h>
 #include <Client/IRenderer.h>
 #include <Core/Exception.h>
 #include <Core/Settings.h>
 #include <Core/Strings.h>
+#include <Gui/TrainingHost.h>
 #include <Gui/UI/MainScreen/MainScreenUI.h>
 #include <ScriptBindings/ScriptManager.h>
 
 DEFINE_SPADES_SETTING(cg_playerName, "Deuce");
+
+// In a headset, the menus stand on a generated map instead of in a void.
+DEFINE_SPADES_SETTING(vr_menuScene, "1");
+SPADES_SETTING(vr_worldScale);
 
 namespace spades {
 	namespace gui {
@@ -58,6 +72,7 @@ namespace spades {
 		MainScreen::~MainScreen() {
 			SPADES_MARK_FUNCTION();
 			helper->MainScreenDestroyed();
+			TrainingHost::Get().Stop();
 		}
 
 		// Restores renderer's state (game map, fog color)
@@ -65,6 +80,99 @@ namespace spades {
 		void MainScreen::RestoreRenderer() {
 			if (ui)
 				ui->SetupRenderer();
+			// The game that ended set its own map and then none.
+			vrMenuMapSet = false;
+			vrMenuAnchored = false;
+		}
+
+		void MainScreen::DrawVRMenuScene() {
+			client::IVRSystem* vr = client::GetVRSystem();
+			if (!vr || !(int)vr_menuScene)
+				return;
+			const client::VRFrameState& fs = vr->GetFrameState();
+			if (!fs.running || !fs.shouldRender || !fs.head.valid)
+				return;
+
+			// The map: generated once, off the frame (a headset must not stall),
+			// and loaded when it is ready. Until then, the void.
+			if (!vrMenuMapStarted) {
+				vrMenuMapStarted = true;
+				vrMenuMapLoad = std::async(std::launch::async, []() -> client::GameMap* {
+					host::VoxelMap m;
+					host::generate_map(m, 0x5EED);
+					const std::vector<uint8_t> bytes = m.save_vxl();
+					MemoryStream stream(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+					return client::GameMap::Load(&stream);
+				});
+			}
+			if (!vrMenuMap) {
+				if (!vrMenuMapLoad.valid() ||
+				    vrMenuMapLoad.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+					return;
+				try {
+					vrMenuMap = Handle<client::GameMap>(vrMenuMapLoad.get(), false);
+					SPLog("[VR] Menu scene: standing on a generated map");
+				} catch (const std::exception& ex) {
+					SPLog("[VR] Menu scene: the map did not load: %s", ex.what());
+					return;
+				}
+				if (!vrMenuMap)
+					return;
+			}
+			if (!vrMenuMapSet) {
+				renderer->SetGameMap(vrMenuMap);
+				renderer->SetFogColor(MakeVector3(128.0F, 232.0F, 255.0F) / 255.0F);
+				renderer->SetFogDistance(128.0F);
+				vrMenuMapSet = true;
+			}
+
+			// Standing 4 blocks over the ground (a little over a player's eye) at the blue end, looking down the
+			// map. The head's own movement moves the view, as it would anywhere
+			// (a view that ignores the head is what makes people sick); turning is
+			// all the head's. Tracking -Z is the game's +X (VRTrackingToGameAxes).
+			const float scale = std::max(0.5F, std::min((float)vr_worldScale, 4.0F));
+			if (!vrMenuAnchored) {
+				vrMenuAnchored = true;
+				vrMenuAnchor = fs.head.position;
+				const int x = 96, y = 256;
+				vrMenuEye = MakeVector3((float)x, (float)y, (float)vrMenuMap->GetTop(x, y) - 4.0F);
+			}
+			auto toWorld = [&](const Vector3& v) { return client::VRTrackingToGameAxes(v) * scale; };
+			const Vector3 origin = vrMenuEye + toWorld(fs.head.position - vrMenuAnchor);
+
+			client::SceneDefinition def;
+			def.time = static_cast<unsigned int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+			def.zNear = 0.05F;
+			def.zFar = 160.0F;
+			def.viewOrigin = origin;
+			const Vector3 fwd = client::VRTrackingToGameAxes(-fs.head.Axis(2)).Normalize();
+			const Vector3 up = client::VRTrackingToGameAxes(fs.head.Axis(1)).Normalize();
+			def.viewAxis[2] = fwd;
+			def.viewAxis[1] = -up;
+			def.viewAxis[0] = Vector3::Cross(def.viewAxis[1], def.viewAxis[2]).Normalize();
+			def.fovX = 2.0F * std::atan(fs.eyeTanX[0]);
+			def.fovY = 2.0F * std::atan(fs.eyeTanY[0]);
+			for (int i = 0; i < 2; i++) {
+				auto& e = def.vrEyes[i];
+				const client::VRPose& eye = fs.eyes[i];
+				e.origin = origin + toWorld(eye.position - fs.head.position);
+				e.axis[0] = client::VRTrackingToGameAxes(eye.Axis(0)).Normalize();
+				e.axis[1] = client::VRTrackingToGameAxes(eye.Axis(1)).Normalize();
+				e.axis[2] = client::VRTrackingToGameAxes(-eye.Axis(2)).Normalize();
+				e.fovX = 2.0F * std::atan(fs.eyeTanX[i]);
+				e.fovY = 2.0F * std::atan(fs.eyeTanY[i]);
+				e.asymmetric = fs.eyeAsymmetric;
+				e.tangents =
+				  client::FovTangents{fs.eyeLeft[i], fs.eyeRight[i], fs.eyeDown[i], fs.eyeUp[i]};
+			}
+			def.numVREyes = 2;
+			def.denyCameraBlur = true;
+			def.radialBlur = 0.0F;
+			def.blurVignette = 0.0F;
+			def.depthOfFieldFocalLength = 0.0F;
+			def.globalBlur = 0.0F;
+			renderer->StartScene(def);
+			renderer->EndScene();
 		}
 
 		bool MainScreen::NeedsAbsoluteMouseCoordinate() {
@@ -194,6 +302,8 @@ namespace spades {
 					SPLog("[!] Error while running a game client: %s", ex.what());
 					subview->Closing();
 					subview = NULL;
+					// The training course ends with the view that played it.
+					TrainingHost::Get().Stop();
 					RestoreRenderer();
 					helper->errorMessage = ex.what();
 				}
@@ -213,6 +323,14 @@ namespace spades {
 			}
 
 			helper->Update();
+
+			// In a headset the menus stand on a map (vr_menuScene).
+			try {
+				DrawVRMenuScene();
+			} catch (const std::exception& ex) {
+				SPLog("[VR] Menu scene failed, left off: %s", ex.what());
+				vr_menuScene = 0;
+			}
 
 			// `DoInit` either sets `ui` or throws, so this should not fire. Guard it
 			// anyway, so that an init path which ever leaves `ui` unset stops here
@@ -237,11 +355,15 @@ namespace spades {
 
 				subview->Closing();
 				subview = NULL;
+				// The training course ends with the view that played it.
+				TrainingHost::Get().Stop();
 				RestoreRenderer();
 			} catch (const std::exception& ex) {
 				SPLog("[!] Error while running a game client: %s", ex.what());
 				subview->Closing();
 				subview = NULL;
+				// The training course ends with the view that played it.
+				TrainingHost::Get().Stop();
 				RestoreRenderer();
 				helper->errorMessage = ex.what();
 			}
@@ -271,6 +393,8 @@ namespace spades {
 			if (subview) {
 				subview->Closing();
 				subview = NULL;
+				// The training course ends with the view that played it.
+				TrainingHost::Get().Stop();
 			}
 
 			if (!ui)

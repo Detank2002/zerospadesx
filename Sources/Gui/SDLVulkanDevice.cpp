@@ -32,6 +32,9 @@
 #include <cstring>
 #include <vector>
 #include <SDL2/SDL_vulkan.h>
+#if USE_OPENXR
+#include <VR/OpenXRSystem.h>
+#endif
 
 SPADES_SETTING(r_multisamples);
 SPADES_SETTING(r_vsync);
@@ -152,7 +155,7 @@ namespace spades {
 			return missing.empty();
 		}
 
-		SDLVulkanDevice::SDLVulkanDevice(SDL_Window* wnd)
+		SDLVulkanDevice::SDLVulkanDevice(SDL_Window* wnd, bool headless)
 		: window(wnd),
 		  instance(VK_NULL_HANDLE),
 		  surface(VK_NULL_HANDLE),
@@ -160,6 +163,7 @@ namespace spades {
 		  device(VK_NULL_HANDLE),
 		  graphicsQueue(VK_NULL_HANDLE),
 		  presentQueue(VK_NULL_HANDLE),
+		  headless(headless),
 		  swapchain(VK_NULL_HANDLE),
 		  commandPool(VK_NULL_HANDLE),
 		  currentFrame(0),
@@ -169,7 +173,12 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 
 			SDL_GetWindowSize(window, &w, &h);
-			SPLog("Initializing Vulkan device (window size: %dx%d)", w, h);
+			if (headless && (w <= 0 || h <= 0)) {
+				w = 1280;
+				h = 720;
+			}
+			SPLog("Initializing Vulkan device (%s: %dx%d)", headless ? "no window" : "window size",
+			      w, h);
 
 			try {
 				CreateInstance();
@@ -286,6 +295,14 @@ namespace spades {
 			appInfo.pEngineName = "OpenSpades";
 			appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 5);
 			appInfo.apiVersion = VK_API_VERSION_1_0;
+#if USE_OPENXR
+			// A runtime may need more than 1.0 (it composites through its own
+			// Vulkan code on our instance); everything here is written against 1.0,
+			// which a newer instance still runs.
+			if (vr::OpenXRSystem* xr = vr::GetOpenXRSystem())
+				appInfo.apiVersion = std::max<uint32_t>(appInfo.apiVersion,
+				                                        xr->GetRequiredVulkanApiVersion());
+#endif
 
 			// Get required SDL extensions
 			unsigned int sdlExtensionCount = 0;
@@ -380,7 +397,15 @@ namespace spades {
 			}
 
 
-			VkResult result = vkCreateInstance(&createInfo, nullptr, &instance);
+			VkResult result;
+#if USE_OPENXR
+			// Through the runtime when there is a headset: it appends the instance
+			// extensions it needs to share images with its compositor.
+			if (vr::OpenXRSystem* xr = vr::GetOpenXRSystem())
+				result = xr->CreateVulkanInstance(createInfo, instance);
+			else
+#endif
+				result = vkCreateInstance(&createInfo, nullptr, &instance);
 			if (result != VK_SUCCESS) {
 				SPRaise("Failed to create Vulkan instance (error code: %d)", result);
 			}
@@ -407,6 +432,10 @@ namespace spades {
 		}
 
 		void SDLVulkanDevice::CreateSurface() {
+			if (headless) {
+				SPLog("Vulkan: no window surface (the headset is the only display)");
+				return;
+			}
 			if (!SDL_Vulkan_CreateSurface(window, instance, &surface)) {
 				SPRaise("Failed to create Vulkan surface: %s", SDL_GetError());
 			}
@@ -423,6 +452,17 @@ namespace spades {
 
 			std::vector<VkPhysicalDevice> devices(deviceCount);
 			vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+#if USE_OPENXR
+			// With a headset the GPU is not ours to choose: it has to be the one the
+			// headset is attached to, which the runtime names.
+			if (vr::OpenXRSystem* xr = vr::GetOpenXRSystem()) {
+				VkPhysicalDevice xrDevice = xr->GetVulkanPhysicalDevice(instance);
+				if (xrDevice == VK_NULL_HANDLE)
+					SPRaise("The OpenXR runtime did not name a GPU for the headset");
+				devices.assign(1, xrDevice);
+			}
+#endif
 
 			// For now, just pick the first suitable device
 			// TODO: Implement device scoring to pick the best GPU
@@ -447,7 +487,10 @@ namespace spades {
 					}
 
 					VkBool32 presentSupport = false;
-					vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, surface, &presentSupport);
+					if (headless)
+						presentSupport = (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+					else
+						vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, surface, &presentSupport);
 					if (presentSupport) {
 						presentQueueFamily = i;
 						foundPresent = true;
@@ -589,7 +632,13 @@ namespace spades {
 				bool hasDedicatedAlloc = false;
 				bool hasBindMemory2 = false;
 				bool hasPortabilitySubset = false;
+				bool hasMultiview = false;
+				bool hasDensityMap = false;
 				for (const auto& ext : availExts) {
+					if (strcmp(ext.extensionName, VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME) == 0)
+						hasDensityMap = true;
+					if (strcmp(ext.extensionName, VK_KHR_MULTIVIEW_EXTENSION_NAME) == 0)
+						hasMultiview = true;
 					if (strcmp(ext.extensionName, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME) == 0)
 						hasGetMemReq2 = true;
 					if (strcmp(ext.extensionName, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME) == 0)
@@ -612,6 +661,63 @@ namespace spades {
 					extensions.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
 					bindMemory2Enabled = true;
 				}
+				// Both eyes in one pass (vr_multiview). The extension guarantees the
+				// feature; it is turned on whenever it is there, since it costs
+				// nothing unused, and the renderer decides whether to use it.
+				if (hasMultiview) {
+					extensions.push_back(VK_KHR_MULTIVIEW_EXTENSION_NAME);
+					multiviewSupported = true;
+				}
+				// Foveated rendering (vr_foveation): the outer parts of each eye
+				// shaded at lower density, into ordinary (non-subsampled) targets,
+				// which the post chain then reads as it always does. A standalone
+				// headset's GPU has it (Adreno); the desktop ones mostly do not.
+				// Its features and texel size are asked for through the
+				// properties2 queries (core in 1.1, or the instance extension).
+				// Not asked for, for now: foveation is off (VulkanRenderer), and
+				// builds without the extension never crashed a Quest 2's driver.
+				constexpr bool kUseDensityMap = false;
+				if (kUseDensityMap && hasDensityMap) {
+					auto getFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2KHR>(
+					  vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2KHR"));
+					if (!getFeatures2)
+						getFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2KHR>(
+						  vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2"));
+					auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
+					  vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR"));
+					if (!getProperties2)
+						getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
+						  vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
+					if (getFeatures2 && getProperties2) {
+						VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdm{};
+						fdm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT;
+						VkPhysicalDeviceFeatures2 features{};
+						features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+						features.pNext = &fdm;
+						getFeatures2(physicalDevice, &features);
+						VkPhysicalDeviceFragmentDensityMapPropertiesEXT fdmProps{};
+						fdmProps.sType =
+						  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT;
+						VkPhysicalDeviceProperties2 props{};
+						props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+						props.pNext = &fdmProps;
+						getProperties2(physicalDevice, &props);
+						if (fdm.fragmentDensityMap && fdm.fragmentDensityMapNonSubsampledImages) {
+							extensions.push_back(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+							fragmentDensityMapSupported = true;
+							// The smallest: a map sized for the largest (256x256 on a
+							// Quest 2's Adreno 650, a 6x7 map an eye) crashed its driver
+							// on the first frame; Meta's runtime uses the smallest too.
+							// A larger map than the spec's minimum is allowed.
+							fragmentDensityTexelSize = fdmProps.minFragmentDensityTexelSize;
+							SPLog("Fragment density map: texel %ux%u to %ux%u",
+							      fdmProps.minFragmentDensityTexelSize.width,
+							      fdmProps.minFragmentDensityTexelSize.height,
+							      fdmProps.maxFragmentDensityTexelSize.width,
+							      fdmProps.maxFragmentDensityTexelSize.height);
+						}
+					}
+				}
 			}
 
 			createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
@@ -619,7 +725,29 @@ namespace spades {
 			// No device layers: they are deprecated, and the instance's layers
 			// apply to every device made from it.
 
-			VkResult result = vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
+			VkPhysicalDeviceMultiviewFeaturesKHR multiviewFeatures{};
+			multiviewFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES_KHR;
+			if (multiviewSupported) {
+				multiviewFeatures.multiview = VK_TRUE;
+				multiviewFeatures.pNext = const_cast<void*>(createInfo.pNext);
+				createInfo.pNext = &multiviewFeatures;
+			}
+			VkPhysicalDeviceFragmentDensityMapFeaturesEXT densityMapFeatures{};
+			densityMapFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT;
+			if (fragmentDensityMapSupported) {
+				densityMapFeatures.fragmentDensityMap = VK_TRUE;
+				densityMapFeatures.fragmentDensityMapNonSubsampledImages = VK_TRUE;
+				densityMapFeatures.pNext = const_cast<void*>(createInfo.pNext);
+				createInfo.pNext = &densityMapFeatures;
+			}
+
+			VkResult result;
+#if USE_OPENXR
+			if (vr::OpenXRSystem* xr = vr::GetOpenXRSystem())
+				result = xr->CreateVulkanDevice(physicalDevice, createInfo, device);
+			else
+#endif
+				result = vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
 			if (result != VK_SUCCESS) {
 				SPRaise("Failed to create logical device (error code: %d)", result);
 			}
@@ -678,6 +806,37 @@ namespace spades {
 		}
 
 		void SDLVulkanDevice::CreateSwapchain(VkSwapchainKHR oldSwapchain) {
+			if (headless) {
+				// What a desktop swapchain usually gives, and what the VR path
+				// copies its panels and eyes in.
+				swapchainImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+				swapchainExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+				const uint32_t count = 3;
+				swapchainImages.assign(count, VK_NULL_HANDLE);
+				offscreenAllocations.assign(count, VK_NULL_HANDLE);
+				for (uint32_t i = 0; i < count; i++) {
+					VkImageCreateInfo ici{};
+					ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+					ici.imageType = VK_IMAGE_TYPE_2D;
+					ici.format = swapchainImageFormat;
+					ici.extent = {swapchainExtent.width, swapchainExtent.height, 1};
+					ici.mipLevels = 1;
+					ici.arrayLayers = 1;
+					ici.samples = VK_SAMPLE_COUNT_1_BIT;
+					ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+					ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+					            VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+					ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+					VmaAllocationCreateInfo aci{};
+					aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+					if (vmaCreateImage(allocator, &ici, &aci, &swapchainImages[i],
+					                   &offscreenAllocations[i], nullptr) != VK_SUCCESS)
+						SPRaise("Failed to create an offscreen frame image");
+				}
+				SPLog("Offscreen frames created (%ux%u, %u images, no window)",
+				      swapchainExtent.width, swapchainExtent.height, count);
+				return;
+			}
 			// Query swapchain support
 			VkSurfaceCapabilitiesKHR capabilities;
 			vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &capabilities);
@@ -712,7 +871,20 @@ namespace spades {
 
 			// Waiting for the vertical blank or not, as `r_vsync` asks
 			presentVsync = GetVsyncSetting();
-			presentMode = ChoosePresentMode(presentModes, presentVsync);
+			VkPresentModeKHR presentMode = ChoosePresentMode(presentModes, presentVsync);
+#if USE_OPENXR
+			// With a headset the frame is paced by xrWaitFrame. A FIFO mirror window
+			// would block on the monitor's refresh as well, and a 60Hz monitor would
+			// then drag a 90Hz headset down to 60.
+			if (vr::GetOpenXRSystem() && presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+				for (const auto& availablePresentMode : presentModes) {
+					if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+						presentMode = availablePresentMode;
+						break;
+					}
+				}
+			}
+#endif
 
 			swapchainExtent = extent;
 
@@ -756,7 +928,14 @@ namespace spades {
 				createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 			}
 
-			createInfo.preTransform = capabilities.currentTransform;
+			// The picture is drawn upright and the compositor turns it. Asking
+			// for the surface's current transform promises a pre-rotated
+			// picture, and on a phone held other than its natural way (Android
+			// in landscape) the menus came out on their side.
+			createInfo.preTransform =
+			  (capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+			    ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+			    : capabilities.currentTransform;
 			createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 			createInfo.presentMode = presentMode;
 			createInfo.clipped = VK_TRUE;
@@ -880,12 +1059,33 @@ namespace spades {
 				vkDestroySwapchainKHR(device, swapchain, nullptr);
 				swapchain = VK_NULL_HANDLE;
 			}
+			for (size_t i = 0; i < offscreenAllocations.size(); i++)
+				vmaDestroyImage(allocator, swapchainImages[i], offscreenAllocations[i]);
+			offscreenAllocations.clear();
+			if (headless)
+				swapchainImages.clear();
 		}
 
 		uint32_t SDLVulkanDevice::AcquireNextImage(VkSemaphore* outImageAvailableSemaphore, VkSemaphore* outRenderFinishedSemaphore) {
 			// Note: Frame synchronization is handled by VulkanRenderer's fences in EndScene.
 			// Removed redundant fence wait that was causing frame timing issues.
 
+			if (headless) {
+				// Nothing to wait for: signal the semaphore the renderer waits on
+				// with an empty submit, so the frame's synchronisation is the same
+				// as with a window.
+				const uint32_t imageIndex = offscreenNext;
+				offscreenNext = (offscreenNext + 1) % static_cast<uint32_t>(swapchainImages.size());
+				VkSubmitInfo si{};
+				si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+				si.signalSemaphoreCount = 1;
+				si.pSignalSemaphores = &imageAvailableSemaphores[currentFrame];
+				if (vkQueueSubmit(graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+					SPRaise("Failed to signal an offscreen frame");
+				*outImageAvailableSemaphore = imageAvailableSemaphores[currentFrame];
+				*outRenderFinishedSemaphore = renderFinishedSemaphores[imageIndex];
+				return imageIndex;
+			}
 			uint32_t imageIndex;
 			VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
 				imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
@@ -912,6 +1112,22 @@ namespace spades {
 
 		void SDLVulkanDevice::PresentImage(uint32_t imageIndex, VkSemaphore* waitSemaphores,
 										   uint32_t waitSemaphoreCount) {
+			if (headless) {
+				// The present's only job here: consume the renderFinished signal,
+				// so the semaphore can be signalled again next time round.
+				std::vector<VkPipelineStageFlags> stages(waitSemaphoreCount,
+				                                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+				VkSubmitInfo si{};
+				si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+				si.waitSemaphoreCount = waitSemaphoreCount;
+				si.pWaitSemaphores = waitSemaphores;
+				si.pWaitDstStageMask = stages.data();
+				if (vkQueueSubmit(graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+					SPRaise("Failed to retire an offscreen frame");
+				(void)imageIndex;
+				currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+				return;
+			}
 			VkPresentInfoKHR presentInfo{};
 			presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 			presentInfo.waitSemaphoreCount = waitSemaphoreCount;
@@ -939,6 +1155,8 @@ namespace spades {
 		}
 
 		bool SDLVulkanDevice::PrepareSwapchain() {
+			if (headless)
+				return true; // no window to follow: the offscreen frames stay
 			if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
 				return false;
 

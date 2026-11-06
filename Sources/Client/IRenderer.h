@@ -31,6 +31,7 @@
 
 namespace spades {
 	class Bitmap;
+	class ResourceChanges;
 	class VoxelModel;
 	namespace client {
 		class GameMap;
@@ -189,6 +190,13 @@ namespace spades {
 			 */
 			virtual void ClearCache() {}
 
+			/**
+			 * Reloads, in place, the models and images loaded via `RegisterModel`
+			 * and `RegisterImage` from a file in `changes`, so their holders see the
+			 * new content. One that fails to load keeps its old content.
+			 */
+			virtual void ReloadResources(const ResourceChanges& changes) {}
+
 			virtual Handle<IImage> CreateImage(Bitmap&) = 0;
 			virtual Handle<IModel> CreateModel(VoxelModel&) = 0;
 
@@ -295,6 +303,55 @@ namespace spades {
 			 * tells the software renderer apart.
 			 */
 			virtual RendererInfo GetRendererInfo();
+
+			/**
+			 * Chooses which 2D surface subsequent 2D drawing goes to in a
+			 * headset frame: 0 is the panel in front of the head, 1 is the
+			 * panel on the wrist, 2 and 3 each eye's picture, 4 and 5 each
+			 * eye's picture again for what only the headset should show (the
+			 * comfort vignette and blink: the window's preview of the left eye
+			 * is taken between the two). While canvas 1 is chosen, ScreenWidth()
+			 * and ScreenHeight() return its size. Returns false (and
+			 * changes nothing) when the renderer has no such surface, which
+			 * is every renderer outside a headset frame.
+			 */
+			virtual bool SetVRCanvas(int canvas) { return canvas == 0; }
+
+			/**
+			 * Pixels drawn per 2D layout pixel. Above 1 when the 2D layer is
+			 * supersampled (in a headset, where it is drawn at twice its layout
+			 * size and filtered down); fonts rasterise their glyphs at this
+			 * density so text stays sharp rather than being magnified.
+			 */
+			virtual float GetUIPixelRatio() { return 1.0F; }
+
+			/**
+			 * In a headset: how long the GPU took over the last frame's eyes, and
+			 * the fraction of the eyes' full size they are drawn at. False when
+			 * there is nothing to report.
+			 */
+			/**
+			 * In a headset: draw one more view this frame, square, from `origin`
+			 * looking along `forward` with a `fov` (radians) field of view, for a
+			 * rifle scope. Asked for each frame it is wanted, between StartScene and
+			 * EndScene. The picture is GetVRScopeImage(), for the 2D layer.
+			 */
+			virtual void SetVRScopeView(const Vector3& origin, const Vector3& right,
+			                            const Vector3& up, const Vector3& forward, float fov) {
+				(void)origin;
+				(void)right;
+				(void)up;
+				(void)forward;
+				(void)fov;
+			}
+			/** The scope's picture this frame (top row first), or null. */
+			virtual IImage* GetVRScopeImage() { return nullptr; }
+
+			virtual bool GetVRFrameStats(float& gpuMilliseconds, float& resolutionScale) {
+				(void)gpuMilliseconds;
+				(void)resolutionScale;
+				return false;
+			}
 
 			/** Finalizes a frame. */
 			virtual void FrameDone() = 0;

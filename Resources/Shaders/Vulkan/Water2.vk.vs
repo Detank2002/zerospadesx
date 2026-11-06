@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define ZS_VIEWS_SET 1 // in place of the empty set before the lights
+#include "Multiview.glsl"
 
 /*
  Copyright (c) 2013 Fran6nd
@@ -47,6 +51,13 @@ layout(location = 5) out float v_surfaceHeight;
 // Wave texture array for displacement
 layout(binding = 8) uniform sampler2DArray waveTextureArray;
 
+#ifdef ZS_MULTIVIEW
+#define ZS_VIEW zsViews.view[gl_ViewIndex]
+#define ZS_EYE_ORIGIN zsViews.eyeOrigin[gl_ViewIndex]
+#else
+#define ZS_VIEW waterMat.viewMatrix
+#define ZS_EYE_ORIGIN waterMat.viewOriginVector
+#endif
 // Fog computation from OpenGL Fog.vs
 vec4 ComputeFogDensity(float poweredLength) {
 	return vec4(min(poweredLength / (waterMat.fogDistance * waterMat.fogDistance), 1.0));
@@ -82,7 +93,7 @@ void main() {
 	v_worldPositionOriginal = v_worldPosition.xy;
 	v_surfaceHeight = v_worldPosition.z;
 	v_worldPosition += DisplaceWater(v_worldPositionOriginal);
-	v_viewPosition = (waterMat.viewMatrix * vec4(v_worldPosition, 1.0)).xyz;
+	v_viewPosition = (ZS_VIEW * vec4(v_worldPosition, 1.0)).xyz;
 
 	gl_Position = waterMat.projectionViewMatrix * vec4(v_worldPosition, 1.0);
 	v_screenPosition = gl_Position.xyw;
@@ -90,7 +101,17 @@ void main() {
 	v_screenPosition.x = (v_screenPosition.x + v_screenPosition.z) * 0.5;
 	v_screenPosition.y = (v_screenPosition.z - v_screenPosition.y) * 0.5;
 
-	vec2 horzRelativePos = v_worldPosition.xy - waterMat.viewOriginVector.xy;
+	vec2 horzRelativePos = v_worldPosition.xy - ZS_EYE_ORIGIN.xy;
 	float horzDistance = dot(horzRelativePos, horzRelativePos);
 	v_fogDensity = ComputeFogDensity(horzDistance).xyz;
+#ifdef ZS_MULTIVIEW
+	gl_Position = ZS_CORRECT(gl_Position);
+	// The screen position this eye samples the scene copy at: from its own
+	// clip position, not eye 0's. Taken before the correction, the right eye
+	// read the scene copy where the left eye sees the water, and its water
+	// showed a shifted copy of its own view, gun and all (on the Quest).
+	v_screenPosition = gl_Position.xyw;
+	v_screenPosition.x = (v_screenPosition.x + v_screenPosition.z) * 0.5;
+	v_screenPosition.y = (v_screenPosition.z - v_screenPosition.y) * 0.5;
+#endif
 }

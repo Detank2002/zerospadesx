@@ -21,7 +21,8 @@
     "vulkan-headers",
     {
       "name": "glslang",
-      "features": ["tools"]
+      "features": ["tools"],
+      "platform": "!android"
     },
     {
       "name": "molten-vk",
@@ -29,16 +30,20 @@
     },
     {
       "name": "vulkan-loader",
-      "platform": "!osx & !ios"
+      "platform": "!osx & !ios & !android"
     },
     "spirv-cross",
     {
       "name": "glew",
-      "platform": "!osx & !ios"
+      "platform": "!osx & !ios & !android"
     },
     {
       "name": "curl",
       "platform": "!osx & !ios"
+    },
+    {
+      "name": "openxr-loader",
+      "platform": "windows | linux | android"
     }
   ]
 }

@@ -2,6 +2,10 @@ static const char *credits = R"**(
 
 ${PACKAGE_STRING}
 
+ZeroSpades X is ZeroSpades (github.com/Fran6nd/zerospades) with VR and the
+Quest 3 build, by Detank2002. ZeroSpades is a fork of OpenSpades by yvt and
+its contributors, credited below.
+
 
 Credits
 -------

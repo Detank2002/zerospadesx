@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the scene view's set
+#define ZS_VIEWS_BINDING 2
+#include "Multiview.glsl"
+
 // Vulkan port of OptimizedVoxelModelXRay.vs. The GL model samples a texture
 // atlas where this one carries per-vertex colours, so the albedo arrives as a
 // vertex attribute instead of a texture coordinate; everything else matches.
@@ -69,4 +73,5 @@ void main() {
 	fresnel = f0 + (1.0 - f0) * pow(1.0 - dotNV, 4.0);
 
 	vertexColor = vec3(colorAttribute) / 255.0;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

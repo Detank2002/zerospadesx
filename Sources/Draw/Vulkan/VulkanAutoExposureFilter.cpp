@@ -20,6 +20,7 @@
 
 #include "VulkanAutoExposureFilter.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanFramebufferManager.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
@@ -120,6 +121,8 @@ namespace spades {
 			if (downsamplePipeline  != VK_NULL_HANDLE) vkDestroyPipeline(dev, downsamplePipeline,  nullptr);
 			if (computeGainPipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, computeGainPipeline, nullptr);
 			if (applyPipeline       != VK_NULL_HANDLE) vkDestroyPipeline(dev, applyPipeline,       nullptr);
+			if (applyPipelineMV != VK_NULL_HANDLE) vkDestroyPipeline(dev, applyPipelineMV, nullptr);
+			if (ppRenderPassMV != VK_NULL_HANDLE) vkDestroyRenderPass(dev, ppRenderPassMV, nullptr);
 
 			if (preprocessLayout   != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, preprocessLayout,   nullptr);
 			if (computeGainLayout  != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, computeGainLayout,  nullptr);
@@ -156,6 +159,13 @@ namespace spades {
 			    VK_IMAGE_LAYOUT_UNDEFINED,
 			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			    &dep);
+			if (renderer.IsMultiview())
+				ppRenderPassMV = CreateSimpleColorRenderPass(
+			    dev, colorFormat,
+			    VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			    VK_IMAGE_LAYOUT_UNDEFINED,
+			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			    &dep, 0x3);
 
 			// gainFirstRenderPass: first frame only — CLEAR (value supplied at begin),
 			// UNDEFINED → SHADER_READ_ONLY.
@@ -225,6 +235,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -384,6 +395,12 @@ namespace spades {
 			// (same format and sample count); build against gainFirstRenderPass.
 			computeGainPipeline = MakePipeline(gainFS,        computeGainLayout, gainFirstRenderPass, srcAlpha);
 			applyPipeline       = MakePipeline(applyFS,       applyLayout,       ppRenderPass,        noBlend);
+			if (ppRenderPassMV != VK_NULL_HANDLE) {
+				VkShaderModule applyMV = LoadSPIRV("Shaders/Vulkan/PostFilters/AutoExposureApply.vk.fs.mv.spv",
+				                                   VK_SHADER_STAGE_FRAGMENT_BIT);
+				applyPipelineMV = MakePipeline(applyMV, applyLayout, ppRenderPassMV, noBlend);
+				vkDestroyShaderModule(dev, applyMV, nullptr);
+			}
 
 			vkDestroyShaderModule(dev, vs,           nullptr);
 			vkDestroyShaderModule(dev, preprocessFS, nullptr);
@@ -614,116 +631,125 @@ namespace spades {
 			std::vector<Handle<VulkanImage>> tempImages;
 			VulkanTemporaryImagePool* pool = renderer.GetTemporaryImagePool();
 
-			VkImageView srcView = input->GetImageView();
-			uint32_t    w       = static_cast<uint32_t>(renderer.GetRenderWidth());
-			uint32_t    h       = static_cast<uint32_t>(renderer.GetRenderHeight());
-			bool        first   = true;
+			// A headset's second eye applies the exposure the first eye worked out
+			// this frame. Updating it again moved the exposure twice a frame, and
+			// showed the right eye a step further along than the left.
+			const bool reuseExposure = exposureInitialized && renderer.GetVREyeIndex() > 0;
+			// Multiview: both eyes come in as layers; the exposure is measured on
+			// the left eye's, as the per-eye path does, and applied to both.
+			const bool layered = input->GetArrayLayers() > 1 && applyPipelineMV != VK_NULL_HANDLE;
+			if (!reuseExposure) {
+				VkImageView srcView = layered ? input->GetLayerView(0) : input->GetImageView();
+				uint32_t    w       = static_cast<uint32_t>(renderer.GetRenderWidth());
+				uint32_t    h       = static_cast<uint32_t>(renderer.GetRenderHeight());
+				bool        first   = true;
 
-			while (w > 1 || h > 1) {
-				uint32_t nw = (w + 1) / 2;
-				uint32_t nh = (h + 1) / 2;
+				while (w > 1 || h > 1) {
+					uint32_t nw = (w + 1) / 2;
+					uint32_t nh = (h + 1) / 2;
 
-				Handle<VulkanImage> dst = pool->Acquire(nw, nh, colorFormat);
-				VkFramebuffer fb = MakeFramebuffer(ppRenderPass, dst.GetPointerOrNull(), frameSlot);
-				VkDescriptorSet ds = BindTexture(frameSlot, singleSamplerDSL, srcView);
+					Handle<VulkanImage> dst = pool->Acquire(nw, nh, colorFormat);
+					VkFramebuffer fb = MakeFramebuffer(ppRenderPass, dst.GetPointerOrNull(), frameSlot);
+					VkDescriptorSet ds = BindTexture(frameSlot, singleSamplerDSL, srcView);
 
-				DrawFullscreen(cmd, ppRenderPass, fb, nw, nh,
-				               first ? preprocessPipeline : downsamplePipeline,
-				               preprocessLayout, ds);
+					DrawFullscreen(cmd, ppRenderPass, fb, nw, nh,
+					               first ? preprocessPipeline : downsamplePipeline,
+					               preprocessLayout, ds);
 
-				srcView = dst->GetImageView();
-				tempImages.push_back(dst);
-				w = nw;  h = nh;  first = false;
-			}
+					srcView = dst->GetImageView();
+					tempImages.push_back(dst);
+					w = nw;  h = nh;  first = false;
+				}
 
-			// ── 2. Compute-gain pass ──────────────────────────────────────
-			// Blend the 1×1 brightness into the persistent exposure accumulator
-			// using temporal smoothing.  The blend rate is carried in alpha.
+				// ── 2. Compute-gain pass ──────────────────────────────────────
+				// Blend the 1×1 brightness into the persistent exposure accumulator
+				// using temporal smoothing.  The blend rate is carried in alpha.
 
-			float minExp = std::min(std::max((float)r_hdrAutoExposureMin, -10.0f), 10.0f);
-			float maxExp = std::min(std::max((float)r_hdrAutoExposureMax, minExp),  10.0f);
-			float speed  = std::max((float)r_hdrAutoExposureSpeed, 0.0f);
-			float rate   = 1.0f - std::pow(0.01f, dt * speed);
+				float minExp = std::min(std::max((float)r_hdrAutoExposureMin, -10.0f), 10.0f);
+				float maxExp = std::min(std::max((float)r_hdrAutoExposureMax, minExp),  10.0f);
+				float speed  = std::max((float)r_hdrAutoExposureSpeed, 0.0f);
+				float rate   = 1.0f - std::pow(0.01f, dt * speed);
 
-			GainParams gainPC{
-			    std::pow(2.0f, minExp),
-			    std::pow(2.0f, maxExp),
-			    rate
-			};
+				GainParams gainPC{
+				    std::pow(2.0f, minExp),
+				    std::pow(2.0f, maxExp),
+				    rate
+				};
 
-			VkDescriptorSet gainDS = BindTexture(frameSlot, singleSamplerDSL, srcView);
+				VkDescriptorSet gainDS = BindTexture(frameSlot, singleSamplerDSL, srcView);
 
-			if (!exposureInitialized) {
-				// First frame: use gainFirstRenderPass (CLEAR to white, UNDEFINED initial).
-				// Clear value (1,1,1,1) initialises the accumulator to unity gain,
-				// matching the GL renderer's constructor clear.
-				VkClearValue cv{};
-				cv.color = {{1.0f, 1.0f, 1.0f, 1.0f}};
+				if (!exposureInitialized) {
+					// First frame: use gainFirstRenderPass (CLEAR to white, UNDEFINED initial).
+					// Clear value (1,1,1,1) initialises the accumulator to unity gain,
+					// matching the GL renderer's constructor clear.
+					VkClearValue cv{};
+					cv.color = {{1.0f, 1.0f, 1.0f, 1.0f}};
 
-				VkRenderPassBeginInfo rpBegin{};
-				rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-				rpBegin.renderPass        = gainFirstRenderPass;
-				rpBegin.framebuffer       = exposureFramebuffer;
-				rpBegin.renderArea.extent = {1, 1};
-				rpBegin.clearValueCount   = 1;
-				rpBegin.pClearValues      = &cv;
+					VkRenderPassBeginInfo rpBegin{};
+					rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+					rpBegin.renderPass        = gainFirstRenderPass;
+					rpBegin.framebuffer       = exposureFramebuffer;
+					rpBegin.renderArea.extent = {1, 1};
+					rpBegin.clearValueCount   = 1;
+					rpBegin.pClearValues      = &cv;
 
-				vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+					vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-				VkViewport vp{0, 0, 1, 1, 0, 1};
-				VkRect2D   sc{{0, 0}, {1, 1}};
-				vkCmdSetViewport(cmd, 0, 1, &vp);
-				vkCmdSetScissor(cmd, 0, 1, &sc);
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, computeGainPipeline);
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				                        computeGainLayout, 0, 1, &gainDS, 0, nullptr);
-				PushConstants(cmd, computeGainLayout, VK_SHADER_STAGE_FRAGMENT_BIT, gainPC);
-				vkCmdDraw(cmd, 3, 1, 0, 0);
-				vkCmdEndRenderPass(cmd);
+					VkViewport vp{0, 0, 1, 1, 0, 1};
+					VkRect2D   sc{{0, 0}, {1, 1}};
+					vkCmdSetViewport(cmd, 0, 1, &vp);
+					vkCmdSetScissor(cmd, 0, 1, &sc);
+					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, computeGainPipeline);
+					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					                        computeGainLayout, 0, 1, &gainDS, 0, nullptr);
+					PushConstants(cmd, computeGainLayout, VK_SHADER_STAGE_FRAGMENT_BIT, gainPC);
+					vkCmdDraw(cmd, 3, 1, 0, 0);
+					vkCmdEndRenderPass(cmd);
 
-				exposureInitialized = true;
-			} else {
-				// Subsequent frames: transition SHADER_READ_ONLY → COLOR_ATTACHMENT,
-				// then use gainRenderPass (LOAD) so blending accumulates the gain.
-				VkImageMemoryBarrier bar{};
-				bar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-				bar.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				bar.newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-				bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-				bar.image               = exposureImage;
-				bar.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-				bar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
-				bar.dstAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-				                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-				vkCmdPipelineBarrier(cmd,
-				    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				    0, 0, nullptr, 0, nullptr, 1, &bar);
+					exposureInitialized = true;
+				} else {
+					// Subsequent frames: transition SHADER_READ_ONLY → COLOR_ATTACHMENT,
+					// then use gainRenderPass (LOAD) so blending accumulates the gain.
+					VkImageMemoryBarrier bar{};
+					bar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+					bar.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					bar.newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+					bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					bar.image               = exposureImage;
+					bar.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+					bar.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+					bar.dstAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+					                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+					vkCmdPipelineBarrier(cmd,
+					    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					    0, 0, nullptr, 0, nullptr, 1, &bar);
 
-				VkClearValue cv{};
-				cv.color = {{0.0f, 0.0f, 0.0f, 0.0f}}; // unused (LOAD op)
+					VkClearValue cv{};
+					cv.color = {{0.0f, 0.0f, 0.0f, 0.0f}}; // unused (LOAD op)
 
-				VkRenderPassBeginInfo rpBegin{};
-				rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-				rpBegin.renderPass        = gainRenderPass;
-				rpBegin.framebuffer       = exposureFramebuffer;
-				rpBegin.renderArea.extent = {1, 1};
-				rpBegin.clearValueCount   = 1;
-				rpBegin.pClearValues      = &cv;
+					VkRenderPassBeginInfo rpBegin{};
+					rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+					rpBegin.renderPass        = gainRenderPass;
+					rpBegin.framebuffer       = exposureFramebuffer;
+					rpBegin.renderArea.extent = {1, 1};
+					rpBegin.clearValueCount   = 1;
+					rpBegin.pClearValues      = &cv;
 
-				vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+					vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-				VkViewport vp{0, 0, 1, 1, 0, 1};
-				VkRect2D   sc{{0, 0}, {1, 1}};
-				vkCmdSetViewport(cmd, 0, 1, &vp);
-				vkCmdSetScissor(cmd, 0, 1, &sc);
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, computeGainPipeline);
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				                        computeGainLayout, 0, 1, &gainDS, 0, nullptr);
-				PushConstants(cmd, computeGainLayout, VK_SHADER_STAGE_FRAGMENT_BIT, gainPC);
-				vkCmdDraw(cmd, 3, 1, 0, 0);
-				vkCmdEndRenderPass(cmd);
+					VkViewport vp{0, 0, 1, 1, 0, 1};
+					VkRect2D   sc{{0, 0}, {1, 1}};
+					vkCmdSetViewport(cmd, 0, 1, &vp);
+					vkCmdSetScissor(cmd, 0, 1, &sc);
+					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, computeGainPipeline);
+					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					                        computeGainLayout, 0, 1, &gainDS, 0, nullptr);
+					PushConstants(cmd, computeGainLayout, VK_SHADER_STAGE_FRAGMENT_BIT, gainPC);
+					vkCmdDraw(cmd, 3, 1, 0, 0);
+					vkCmdEndRenderPass(cmd);
+				}
 			}
 
 			// After gainRenderPass the exposure image is in SHADER_READ_ONLY_OPTIMAL.
@@ -734,7 +760,8 @@ namespace spades {
 			uint32_t rw = static_cast<uint32_t>(renderer.GetRenderWidth());
 			uint32_t rh = static_cast<uint32_t>(renderer.GetRenderHeight());
 
-			VkFramebuffer applyFB = MakeFramebuffer(ppRenderPass, output, frameSlot);
+			const VkRenderPass applyPass = layered ? ppRenderPassMV : ppRenderPass;
+			VkFramebuffer applyFB = MakeFramebuffer(applyPass, output, frameSlot);
 			VkDescriptorSet applyDS = BindTextures(frameSlot, dualSamplerDSL,
 			                                       input->GetImageView(),
 			                                       exposureImageView);
@@ -753,7 +780,7 @@ namespace spades {
 
 				VkRenderPassBeginInfo rpBegin{};
 				rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-				rpBegin.renderPass        = ppRenderPass;
+				rpBegin.renderPass        = applyPass;
 				rpBegin.framebuffer       = applyFB;
 				rpBegin.renderArea.extent = {rw, rh};
 				rpBegin.clearValueCount   = 1;
@@ -766,7 +793,8 @@ namespace spades {
 				vkCmdSetViewport(cmd, 0, 1, &viewport);
 				vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, applyPipeline);
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				                  layered ? applyPipelineMV : applyPipeline);
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 				                        applyLayout, 0, 1, &applyDS, 0, nullptr);
 				PushConstants(cmd, applyLayout, VK_SHADER_STAGE_FRAGMENT_BIT,

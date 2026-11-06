@@ -26,7 +26,9 @@
 #include "VulkanModelManager.h"
 #include "VulkanOptimizedVoxelModel.h"
 #include <Core/Debug.h>
+#include <Core/FileManager.h>
 #include <Core/IStream.h>
+#include <Core/ResourceChanges.h>
 #include <Core/Settings.h>
 #include <Core/VoxelModel.h>
 #include <Core/VoxelModelLoader.h>
@@ -46,22 +48,41 @@ namespace spades {
 
 			auto it = models.find(std::string(name));
 			if (it == models.end()) {
-				Handle<client::IModel> m = CreateModel(name);
+				Handle<VulkanOptimizedVoxelModel> m = CreateModel(name);
 				models[name] = m;
-				return m;
+				return m.Cast<client::IModel>();
 			}
-			return it->second;
+			return it->second.Cast<client::IModel>();
 		}
 
-		Handle<client::IModel> VulkanModelManager::CreateModel(const char* name) {
+		Handle<VulkanOptimizedVoxelModel> VulkanModelManager::CreateModel(const char* name) {
 			SPADES_MARK_FUNCTION();
 
 			auto voxelModel = VoxelModelLoader::Load(name);
-			return renderer.CreateModel(*voxelModel);
+			return Handle<VulkanOptimizedVoxelModel>::New(voxelModel.GetPointerOrNull(), renderer);
 		}
 
 		void VulkanModelManager::ClearCache() {
 			models.clear();
+		}
+
+		void VulkanModelManager::ReloadResources(const ResourceChanges& changes) {
+			SPADES_MARK_FUNCTION();
+
+			for (const auto& entry : models) {
+				if (!changes.Contains(entry.first) &&
+				    !changes.Contains(VoxelModelLoader::GetMetadataPath(entry.first)))
+					continue;
+				// Gone with a disabled mod: keep what is loaded.
+				if (!FileManager::FileExists(entry.first.c_str()))
+					continue;
+				try {
+					entry.second->Replace(*CreateModel(entry.first.c_str()));
+				} catch (const std::exception& ex) {
+					// Broken: keep what is loaded.
+					SPLog("Model '%s' not reloaded: %s", entry.first.c_str(), ex.what());
+				}
+			}
 		}
 	} // namespace draw
 } // namespace spades

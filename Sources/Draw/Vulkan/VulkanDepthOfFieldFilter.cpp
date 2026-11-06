@@ -20,6 +20,7 @@
 
 #include "VulkanDepthOfFieldFilter.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanFramebufferManager.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
@@ -228,6 +229,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;

@@ -1,6 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 1 // in place of the empty set before the lights
+#include "Multiview.glsl"
+
 /*
  Copyright (c) 2013 Fran6nd
 
@@ -67,12 +70,12 @@ layout(location = 3) in vec3 v_worldPosition;
 layout(location = 4) in vec2 v_worldPositionOriginal;
 layout(location = 5) in float v_surfaceHeight;
 
-layout(binding = 0) uniform sampler2D screenTexture;
-layout(binding = 1) uniform sampler2D depthTexture;
+layout(binding = 0) uniform ZS_SCREEN_SAMPLER screenTexture;
+layout(binding = 1) uniform ZS_SCREEN_SAMPLER depthTexture;
 layout(binding = 2) uniform sampler2D mainTexture;
 layout(binding = 8) uniform sampler2DArray waveTextureArray;
-layout(binding = 6) uniform sampler2D mirrorTexture;
-layout(binding = 7) uniform sampler2D mirrorDepthTexture;
+layout(binding = 6) uniform ZS_SCREEN_SAMPLER mirrorTexture;
+layout(binding = 7) uniform ZS_SCREEN_SAMPLER mirrorDepthTexture;
 
 // Push constants for frequently updated per-frame data (112 bytes, within 128 byte limit)
 layout(push_constant) uniform WaterPushConstants {
@@ -109,6 +112,29 @@ layout(location = 0) out vec4 fragColor;
 
 
 
+// Multiview: this eye's view of the water, where it differs from eye 0's
+#ifdef ZS_MULTIVIEW
+#define ZS_EYE_ORIGIN zsViews.eyeOrigin[gl_ViewIndex]
+#define ZS_FOVTAN zsViews.fovTan[gl_ViewIndex]
+#else
+#define ZS_EYE_ORIGIN waterPC.viewOriginVector
+#define ZS_FOVTAN waterPC.fovTan
+#endif
+#ifdef ZS_MULTIVIEW
+#define ZS_VIEW zsViews.view[gl_ViewIndex]
+// The water's plane in this eye's view space, as the C++ builds it for one view
+// (VulkanWaterRenderer: the model-view's z axis, and its offset).
+vec4 zsWaterPlane() {
+	mat4 vm = zsViews.view[gl_ViewIndex] * waterMat.modelMatrix;
+	vec3 n = vm[2].xyz;
+	return vec4(n, -dot(n, vm[3].xyz));
+}
+#define ZS_WATERPLANE zsWaterPlane()
+#else
+#define ZS_VIEW waterMat.viewMatrix
+#define ZS_WATERPLANE waterPC.waterPlane
+#endif
+
 // GGX distribution function for specular
 float GGXDistribution(float m, float dotHalf) {
 	float m2 = m * m;
@@ -137,12 +163,23 @@ float encodeDepth(float z, float near, float far) {
 }
 
 float depthAt(vec2 pt) {
-	float w = texture(depthTexture, pt).x;
+	float w = ZS_SCREEN_TEX(depthTexture, pt).x;
 	return decodeDepth(w, waterPC.zNearFar.x, waterPC.zNearFar.y);
 }
 
+// A view-space point to what `xy / z / fovTan.xy` gave for a centred view: GL
+// NDC with x negated. Written with the view's edges (fovTan = right, -up, left,
+// -down), so an off-centre view (a headset eye) projects where it draws.
+vec2 waterViewToNdc(vec3 vs) {
+	vec2 t = vs.xy / -vs.z;
+	vec2 lo = vec2(ZS_FOVTAN.z, -ZS_FOVTAN.w);
+	vec2 hi = vec2(ZS_FOVTAN.x, -ZS_FOVTAN.y);
+	vec2 ndc = (2.0 * t - (hi + lo)) / (hi - lo);
+	return vec2(-ndc.x, ndc.y);
+}
+
 void main() {
-	vec3 worldPositionFromOrigin = v_worldPosition - waterPC.viewOriginVector.xyz;
+	vec3 worldPositionFromOrigin = v_worldPosition - ZS_EYE_ORIGIN.xyz;
 	vec4 waveCoord = v_worldPositionOriginal.xyxy * vec4(vec2(0.04), vec2(0.08704)) + vec4(0.0, 0.0, 0.754, 0.1315);
 	vec2 waveCoord2 = v_worldPositionOriginal.xy * 0.00844 + vec2(0.154, 0.7315);
 
@@ -171,7 +208,7 @@ void main() {
 	/* ------- Refraction -------- */
 
 	// Compute the line segment for refraction ray tracing
-	vec3 normalVS = (waterMat.viewMatrix * vec4(-wave, 0.0)).xyz;
+	vec3 normalVS = (ZS_VIEW * vec4(-wave, 0.0)).xyz;
 	vec3 refractedVS = refract(normalize(v_viewPosition.xyz), normalVS, 1.0 / 1.5);
 	vec3 refractTargetVS = v_viewPosition + refractedVS;
 	if (refractTargetVS.z > -0.001) {
@@ -180,7 +217,7 @@ void main() {
 	}
 
 	vec3 refractTargetNDC = vec3(
-		refractTargetVS.xy / refractTargetVS.z / waterPC.fovTan.xy,
+		waterViewToNdc(refractTargetVS),
 		encodeDepth(refractTargetVS.z, waterPC.zNearFar.x, waterPC.zNearFar.y)
 	);
 
@@ -201,12 +238,12 @@ void main() {
 	for (float i = dither / 16.0; i <= 1.0; i += 1.0 / 16.0) {
 		float rayDepth = mix(origDepth, targetDepth, i);
 		refractTargetSS = mix(origScrPos, targetScrPos, i);
-		depth = texture(depthTexture, refractTargetSS).x;
+		depth = ZS_SCREEN_TEX(depthTexture, refractTargetSS).x;
 		if (depth < rayDepth && // ray intersects the object
 			depth > rayDepth - 0.1) { // (perhaps ray's actually going behind the object!)
 			i = max(0.0, i - 1.0 / 16.0);
 			refractTargetSS = mix(origScrPos, targetScrPos, i);
-			depth = texture(depthTexture, refractTargetSS).x;
+			depth = ZS_SCREEN_TEX(depthTexture, refractTargetSS).x;
 			break;
 		}
 	}
@@ -226,7 +263,7 @@ void main() {
 	// distance below is computed against a Y-mirrored point (matches the
 	// reflection plane-test fix; texture sampling still uses the real UV).
 	vec2 refractReconSS = vec2(refractTargetSS.x, 1.0 - refractTargetSS.y);
-	vec3 sampledViewCoord = vec3(mix(waterPC.fovTan.zw, waterPC.fovTan.xy, refractReconSS), 1.0) * -depth;
+	vec3 sampledViewCoord = vec3(mix(ZS_FOVTAN.zw, ZS_FOVTAN.xy, refractReconSS), 1.0) * -depth;
 
 	float envelope = min(distance(v_viewPosition * vec3(-1.0, 1.0, 1.0), sampledViewCoord) * 0.8, 1.0);
 	envelope = 1.0 - (1.0 - envelope) * (1.0 - envelope);
@@ -234,7 +271,7 @@ void main() {
 	// Vulkan-specific guard: at sky-background pixels (raw depth at the far
 	// plane), force envelope to 1.0 so the screenTexture sample can't bleed
 	// the cyan sky color through. Same approach as Water/Water2.vk.fs.
-	float rawDepth = texture(depthTexture, origScrPos).x;
+	float rawDepth = ZS_SCREEN_TEX(depthTexture, origScrPos).x;
 	if (rawDepth >= 0.9999) {
 		envelope = 1.0;
 	}
@@ -262,7 +299,7 @@ void main() {
 	waterColor *= sunlight + EvaluateAmbientLight(1.0) + dynamicLight;
 
 	// underwater object color
-	fragColor = texture(screenTexture, refractTargetSS);
+	fragColor = ZS_SCREEN_TEX(screenTexture, refractTargetSS);
 #if !LINEAR_FRAMEBUFFER
 	fragColor.xyz *= fragColor.xyz; // screen color to linear
 #endif
@@ -281,7 +318,7 @@ void main() {
 
 	// Compute the line segment for refraction ray tracing
 	vec3 reflectedVS = reflect(normalize(v_viewPosition.xyz), normalVS);
-	reflectedVS = reflect(reflectedVS, waterPC.waterPlane.xyz); // reflection's Z position is inverted
+	reflectedVS = reflect(reflectedVS, ZS_WATERPLANE.xyz); // reflection's Z position is inverted
 	vec3 reflectTargetVS = v_viewPosition + reflectedVS * (abs(v_viewPosition.z) + 1.0);
 	if (reflectTargetVS.z > -0.001) {
 		reflectTargetVS = mix(v_viewPosition, reflectedVS,
@@ -289,7 +326,7 @@ void main() {
 	}
 
 	vec3 reflectTargetNDC = vec3(
-		reflectTargetVS.xy / reflectTargetVS.z / waterPC.fovTan.xy,
+		waterViewToNdc(reflectTargetVS),
 		encodeDepth(reflectTargetVS.z, waterPC.zNearFar.x, waterPC.zNearFar.y)
 	);
 
@@ -301,12 +338,12 @@ void main() {
 	for (float i = dither / 16.0; i <= 1.0; i += 1.0 / 16.0) {
 		float rayDepth = mix(origDepth, targetDepth, i);
 		reflectTargetSS = mix(origScrPos, targetScrPos, i);
-		depth = texture(mirrorDepthTexture, reflectTargetSS).x;
+		depth = ZS_SCREEN_TEX(mirrorDepthTexture, reflectTargetSS).x;
 		if (depth < rayDepth && // ray intersects the object
 			depth > rayDepth - 0.1) { // (perhaps ray's actually going behind the object!)
 			i = max(0.0, i - 1.0 / 16.0);
 			reflectTargetSS = mix(origScrPos, targetScrPos, i);
-			depth = texture(mirrorDepthTexture, reflectTargetSS).x;
+			depth = ZS_SCREEN_TEX(mirrorDepthTexture, reflectTargetSS).x;
 			break;
 		}
 	}
@@ -324,11 +361,11 @@ void main() {
 	// the GL-convention UV (1 - y) so the test matches the OpenGL reference.
 	// (Texture sampling below still uses the real Vulkan UV reflectTargetSS.)
 	vec2 reflectReconSS = vec2(reflectTargetSS.x, 1.0 - reflectTargetSS.y);
-	sampledViewCoord = vec3(mix(waterPC.fovTan.zw, waterPC.fovTan.xy, reflectReconSS), 1.0) * -depth;
-	float planeDistance = dot(vec4(sampledViewCoord, 1.0), waterPC.waterPlane);
+	sampledViewCoord = vec3(mix(ZS_FOVTAN.zw, ZS_FOVTAN.xy, reflectReconSS), 1.0) * -depth;
+	float planeDistance = dot(vec4(sampledViewCoord, 1.0), ZS_WATERPLANE);
 	bool validReflection = planeDistance > 0.0;
 
-	vec3 reflected = texture(mirrorTexture, reflectTargetSS).xyz;
+	vec3 reflected = ZS_SCREEN_TEX(mirrorTexture, reflectTargetSS).xyz;
 
 	if (!validReflection) {
 		// The mirrored framebuffer isn't providing a valid reflected image.
@@ -342,7 +379,7 @@ void main() {
 				(-0.001 - v_viewPosition.z) / (reflectedVS.z - v_viewPosition.z));
 		}
 		reflectTargetNDC = vec3(
-			reflectTargetVS.xy / reflectTargetVS.z / waterPC.fovTan.xy,
+			waterViewToNdc(reflectTargetVS),
 			encodeDepth(reflectTargetVS.z, waterPC.zNearFar.x, waterPC.zNearFar.y)
 		);
 
@@ -354,18 +391,18 @@ void main() {
 		for (float i = dither / 32.0; i <= 1.0; i += 1.0 / 32.0) {
 			float rayDepth = mix(origDepth, targetDepth, i);
 			reflectTargetSS = mix(origScrPos, targetScrPos, i);
-			depth = texture(depthTexture, reflectTargetSS).x;
+			depth = ZS_SCREEN_TEX(depthTexture, reflectTargetSS).x;
 			if (depth < rayDepth && // ray intersects the object
 				depth > rayDepth - 0.1) { // (perhaps ray's actually going behind the object!)
 				//i = max(0.0, i - 1.0 / 32.0);
 				//reflectTargetSS = mix(origScrPos, targetScrPos, i);
-				//depth = texture(depthTexture, reflectTargetSS).x;
+				//depth = ZS_SCREEN_TEX(depthTexture, reflectTargetSS).x;
 				break;
 			}
 		}
 
 		reflectedSky = depth > 0.99999;
-		reflected = texture(screenTexture, reflectTargetSS).xyz;
+		reflected = ZS_SCREEN_TEX(screenTexture, reflectTargetSS).xyz;
 	}
 
 	vec3 ongoing = normalize(worldPositionFromOrigin);

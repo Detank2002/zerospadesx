@@ -29,8 +29,11 @@ layout(push_constant) uniform PushConstants {
 	float _pad2;
 	vec3 viewAxisSide;
 	float _pad3;
-	float fovX;
-	float fovY;
+	// The view's edges as tangents: left and down negative.
+	float tanLeft;
+	float tanRight;
+	float tanDown;
+	float tanUp;
 } pushConstants;
 
 layout(location = 0) in vec3 viewDir;

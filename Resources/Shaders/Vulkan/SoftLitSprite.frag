@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the sprite's set (SPRITE_SET)
+#define ZS_VIEWS_BINDING 3
+#include "Multiview.glsl"
+
 // A soft sprite lit as the volume it stands for (`r_softParticles` 2), as GL's
 // SoftLitSprite.fs: the sun through the map's and the models' shadows, the sky's
 // light, and the dynamic lights the vertices scattered, on its colour, then
@@ -33,7 +37,7 @@
 #include "SpriteView.glsl"
 
 // The scene's depth, which a soft sprite fades into
-layout(set = SPRITE_SET, binding = 2) uniform sampler2D depthTexture;
+layout(set = SPRITE_SET, binding = 2) uniform ZS_SCREEN_SAMPLER depthTexture;
 
 layout(location = 0) in vec4 color;
 layout(location = 1) in vec4 texCoord;
@@ -57,7 +61,7 @@ float decodeDepth(float w, float near, float far) {
 }
 
 float depthAt(vec2 pt) {
-	float w = texture(depthTexture, pt).x;
+	float w = ZS_SCREEN_TEX(depthTexture, pt).x;
 	return decodeDepth(w, spriteView.nearFar.x, spriteView.nearFar.y);
 }
 

@@ -33,6 +33,7 @@ layout(push_constant) uniform Params {
     vec4 viewAxisFront;  // xyz
     vec4 fovZNearFar;    // xy = fov (tan half-angle), z = zNear, w = zFar
     vec4 fogColorDist;   // xyz = fogColor (linear), w = fogDistance
+    vec4 fovEdges;       // view-ray tangents: x = left, y = right, z = top, w = bottom
 } pc;
 
 layout(location = 0) out vec2 texCoord;
@@ -54,8 +55,9 @@ void main() {
 
     texCoord = uv;
 
-    vec2 fov = pc.fovZNearFar.xy;
-    viewTan.xy = mix(-fov, fov, uv);
+    // The edges, not +-tan(fov/2): a headset eye's view is not centred.
+    viewTan.x = mix(pc.fovEdges.x, pc.fovEdges.y, uv.x);
+    viewTan.y = mix(pc.fovEdges.z, pc.fovEdges.w, uv.y);
     viewTan.z  = 1.0;
 
     vec3 viewOrigin = pc.viewOriginPad.xyz;

@@ -37,7 +37,8 @@ namespace spades {
 		 * A spotlight costs a pass over everything it reaches and a walk through the
 		 * map for its shadows, so with a crowd of lit players they can't all be
 		 * drawn so. The beams that matter most to the camera are, up to
-		 * `MaxLitBeams`: the one of the player the camera looks through first, then
+		 * `MaxLitBeams` (cg_flashlightBeams): the one of the player the camera looks
+		 * through first, then
 		 * those lighting the view, nearest first. Every other beam in view shows as a
 		 * glow where it lands, as the Flashlight extension lets a client approximate
 		 * a light, in its own colour and over its own reach and cone, and on the
@@ -45,8 +46,8 @@ namespace spades {
 		 */
 		class FlashlightBudget {
 		public:
-			/** The most beams lit as spotlights in a frame. */
-			static constexpr std::size_t MaxLitBeams = 16;
+			/** The most beams lit as spotlights in a frame: cg_flashlightBeams, 1 to 16. */
+			static std::size_t MaxLitBeams();
 
 			/** A lit flashlight's beam, as it is this frame. */
 			struct Beam {

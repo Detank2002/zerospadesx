@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <vector>
 #include <vulkan/vulkan.h>
 #include <Draw/Vulkan/VulkanMemoryAllocator.h>
 #include <Core/RefCountedObject.h>
@@ -50,6 +51,8 @@ namespace spades {
 
 			bool ownsImage; // If false, image is owned externally (e.g., swapchain)
 
+			std::vector<VkImageView> layerViews;
+
 		protected:
 			~VulkanImage();
 
@@ -61,7 +64,8 @@ namespace spades {
 			VulkanImage(Handle<gui::SDLVulkanDevice> device, uint32_t width, uint32_t height,
 			            VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
 			            VkMemoryPropertyFlags properties,
-			            VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
+			            VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+			            uint32_t layers = 1);
 
 			// Create 2D array image with memory allocation
 			VulkanImage(Handle<gui::SDLVulkanDevice> device, uint32_t width, uint32_t height,
@@ -75,6 +79,9 @@ namespace spades {
 
 			VkImage GetImage() const { return image; }
 			VkImageView GetImageView() const { return imageView; }
+			/** A 2D view of one layer of an array image (made on first use). For
+			 * a one-layer image, the ordinary view. */
+			VkImageView GetLayerView(uint32_t layer);
 
 			/**
 			 * The view to hang on a framebuffer. It differs from GetImageView() only

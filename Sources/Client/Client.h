@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <functional>
 #include <unordered_map>
 
 #include "ClientCameraMode.h"
@@ -40,6 +41,10 @@
 #include "NoiseSampler.h"
 #include "PieMenu.h"
 #include "Player.h"
+#include "PieMenuView.h"
+#include "PlayerOutfit.h"
+#include "VRNetProtocol.h"
+#include "VRState.h"
 #include <Core/Math.h>
 #include <Core/ServerAddress.h>
 #include <Core/Stopwatch.h>
@@ -199,6 +204,10 @@ namespace spades {
 			// negotiate the extension.
 			std::unique_ptr<Teamplay> teamplay;
 
+			// Player Models protocol extension: which model set a team or a player is
+			// drawn with. Empty when the server does not negotiate it.
+			PlayerOutfits playerOutfits;
+
 			// player state
 			PlayerInput playerInput;
 			WeaponInput weapInput;
@@ -291,6 +300,9 @@ namespace spades {
 				int playerId;
 				float fade;
 				float lastHitTime;
+				// Not drawn before this: a hit the server refused (it had us dead
+				// first) is dropped by then (DamageIndicatorDelay).
+				float showAt = 0.0F;
 				Vector3 position;
 				Vector3 velocity;
 				bool crit;
@@ -501,6 +513,14 @@ namespace spades {
 			void CaptureColor();
 
 			bool inGameLimbo;
+			/** A team picked in the limbo menu, or joined, on this map. Until then
+			 * the menu offers, and Spawn joins, the team with fewer players: a new
+			 * player who spawned at once landed in spectator mode and did not know
+			 * how to get out of it (testers). */
+			bool limboTeamChosen = false;
+			int SmallerTeam();
+			/** The team the limbo menu shows and Spawn joins. */
+			int LimboTeam();
 			bool IsLimboViewActive();
 			void CloseLimboView();
 			void ToggleLimboView();
@@ -735,6 +755,296 @@ namespace spades {
 			 * they were pointing at. */
 			PieAim pieMenuAim;
 
+			bool trainingJoined = false; // RunFrame: the course is joined at once
+
+			// ── VR (Client_VR.cpp) ─────────────────────────────────
+			/** The headset's play space as the game sees it. Tracking space is
+			 * turned by `bodyYaw` and scaled by vr_worldScale into the world; the
+			 * body stands on `anchor`, and the head's offset from it is walked into
+			 * the body (room-scale) as far as the map allows. */
+			struct VRRig {
+				bool active = false;
+				bool calibrated = false;
+				float bodyYaw = 0.0F;
+				float standingHeight = 1.6F;
+				float anchorX = 0.0F, anchorZ = 0.0F;
+				float scale = 1.4F;
+
+				// This frame, world space.
+				Vector3 residual{0.0F, 0.0F, 0.0F}; // head beside the body
+				float lift = 0.0F;                  // head above/below the game eye
+				Vector3 camera{0.0F, 0.0F, 0.0F};
+				Vector3 headAxes[3];                // forward, right, down
+				bool handValid[2] = {false, false};
+				Vector3 handPos[2];
+				Vector3 handAxes[2][3];             // forward, right, down
+				Vector3 aimPos[2];
+				Vector3 handVelocity[2];            // blocks per second
+
+				// Input state carried between frames.
+				bool crouchToggle = false;
+				bool physicalCrouch = false;
+				bool sprintToggle = false;
+				bool snapLatched = false;
+				bool paletteLatched = false;
+				bool prevPrimary[2] = {false, false};
+				bool prevSecondary[2] = {false, false};
+				bool prevStickClick[2] = {false, false};
+				// A gun held in both hands: the off hand on the barrel steers it.
+				bool twoHanded = false;
+				// The shoulder stock's hold and how far it is eased in.
+				VRStockState stock;
+				// ...and with the gun hand at the shoulder, from the shoulder
+				// (vr_shoulderStock), like a stock.
+				bool shouldered = false;
+				// The off hand's trigger held with a gun: any gun braced on the
+				// shoulder as the rifle's stock is (UpdateVRAimAssist).
+				bool braceHeld = false;
+				// Aim smoothing (vr_aimSmooth): the filtered forward of the gun,
+				// and the angular speed it adapts to.
+				VRAimFilter aimFilter;
+				// The gun's recoil, turned in after the smoothing.
+				VRRecoil recoil;
+				bool recoilOn = false;
+				// Each hand's own forward, before any of that.
+				Vector3 ownForward[2];
+				bool offGripHeld = false;
+				// Swinging the spade hits: latched until the hand slows, and the
+				// press held a moment so it lands when the spade is ready.
+				bool swingLatched = false;
+				float swingHold = 0.0F;
+				// Holsters: the one the gun hand is at (VRHolster), and whether its
+				// grip is held since it took a tool from one.
+				int holsterHover = -1;
+				VRGripState grip;
+				bool wasReloading = false;
+				// Guns fire from the eye at what the gun points at (VRGunAimPoint);
+				// the laser shows that shot, from the gun to where it lands.
+				bool gunLaser = false;
+				// The scope's line in the last frame it was looked through: shots
+				// aim along it (the barrel is 0.23 blocks under it).
+				bool scopeAimValid = false;
+				Vector3 scopeAimOrigin{0.0F, 0.0F, 0.0F};
+				Vector3 scopeAimDir{1.0F, 0.0F, 0.0F};
+				// The game's frame rate, smoothed, for the wrist.
+				float fps = 0.0F;
+				// Solid tools (vr_toolCollision): whether the hands are stopped by the
+				// map this frame (alive, in the body), how far the held tool reaches
+				// ahead of its hand (blocks), and whether it is touching.
+				bool solidHands = false;
+				float toolReach = 0.0F;
+				bool toolBlocked = false;
+				// The wrist menu: the other hand brought to the wrist panel. Whether
+				// it is up, and the tool hand's pointer on it (canvas pixels).
+				bool wristMenu = false;
+				bool wristPointing = false;
+				Vector2 wristCursor{0.0F, 0.0F};
+				float wristPointDistance = 0.0F; // metres, controller to panel
+				int wristHover = -1;
+				bool wristPokeArmed = true;
+				bool wristTriggerHeld = false;
+				// A trigger pull that began on the panel: not a shot, until let go.
+				bool wristTriggerOwned = false;
+				bool wristToTeam = true; // where quick chat goes
+				float wristSendCooldown = 0.0F;
+				// Physical reloading (vr_reloadGesture): 0 nothing, 1 the magazine
+				// is out, 2 a new one is in the off hand.
+				int reloadStage = 0;
+				bool prevOffSqueeze = false;
+				/** The off hand's grip, for the headlamp switch at the head. */
+				bool prevLampSqueeze = false;
+				bool lampHandAtHead = false;
+				// The rifle scope (vr_scope), while an eye is behind its lens this
+				// frame: where the lens is, for drawing it into each eye.
+				bool scopeActive = false;
+				// The lens is through a wall: drawn black, never the far side.
+				bool scopeBlocked = false;
+				Vector3 scopeLensPos{0.0F, 0.0F, 0.0F};
+				Vector3 scopeLensRight{1.0F, 0.0F, 0.0F};
+				float scopeLensRadius = 0.0F;
+				// A reflex sight on the held gun (ClientPlayer, from its skin): its
+				// window, the barrel's direction and the window's radius, for its dot
+				// (DrawVRReflexDot).
+				bool reflexActive = false;
+				Vector3 reflexCenter, reflexDir;
+				float reflexRadius = 0.0F;
+				// The picture's half-angles (radians): what the centre of the lens
+				// shows at the monitor's magnification, and what its rim reaches.
+				float scopeCentreHalf = 0.05F;
+				float scopeEdgeHalf = 0.05F;
+				// The gun's own right and up at the lens: the reticle turns with the
+				// gun, the picture stays level with the world.
+				Vector3 scopeGunRight{1.0F, 0.0F, 0.0F};
+				Vector3 scopeGunUp{0.0F, 0.0F, -1.0F};
+				// The comfort camera (vr_comfortCamera). When the view is not your
+				// own body's (dead, following someone), it holds still and moves only
+				// in cuts behind a blink. `flatCameraOrigin` is where the flat
+				// camera is (ApplyVRToSceneDefinition), `fade` 0 clear to 1 black.
+				ClientCameraMode cameraMode = ClientCameraMode::None;
+				ClientCameraMode lastCameraMode = ClientCameraMode::None;
+				Vector3 flatCameraOrigin{0.0F, 0.0F, 0.0F};
+				bool comfortAnchored = false;
+				Vector3 comfortAnchor{0.0F, 0.0F, 0.0F};
+				float comfortAwayTime = 0.0F;
+				float fade = 0.0F;
+				bool fadingOut = false;
+				// The comfort vignette (vr_vignette), 0 none to 1 full, and the
+				// smooth turn's rate (radians a second) that feeds it.
+				float vignette = 0.0F;
+				float turnRate = 0.0F;
+				// Both sticks in: held long enough, a recentre. `stickChord` stays
+				// set until both are out, so neither click toggles anything.
+				bool stickChord = false;
+				float recenterHold = 0.0F;
+				bool recenterHoldFired = false;
+				// The menu's Reset Height (RequestVRHeightReset), for the next frame.
+				bool heightResetRequested = false;
+				bool prevTrigger[2] = {false, false};
+				bool triggerHeld[2] = {false, false};
+				float lastToolUseTime = -100.0F;
+				float poseSendTimer = 0.0F;
+				// Walking between two of the server's eight directions
+				// (UpdateVRPlayerInput): how far the next step leans to the second,
+				// and how long the current choice holds.
+				float walkLean = 0.0F;
+				float walkHold = 0.0F;
+				bool walkSecond = false;
+				// The strongest throw of the last few frames (see UpdateVRPlayerInput).
+				float throwPeakPower = 0.0F;
+				float throwPeakAge = 0.0F;
+				Vector3 throwPeakDir{1.0F, 0.0F, 0.0F};
+			};
+			VRRig vrRig;
+			/** Synthetic keys the controllers are holding down, by key name. */
+			std::unordered_map<std::string, bool> vrHeldKeys;
+
+			struct RemoteVRPose {
+				VRNetPose pose;
+				float receivedTime = 0.0F;
+			};
+			std::unordered_map<int, RemoteVRPose> vrRemotePoses;
+			/** What the server's vr_presence script allows (VRConfig flags). */
+			uint8_t vrServerFlags = 0;
+			float vrPoseInterval = 1.0F / 20.0F;
+
+			/** Reads the controllers into this frame's input, turning and room-scale
+			 * movement. Before UpdateWorld, so the physics sees it. */
+			void UpdateVR(float dt);
+			void UpdateVRPlayerInput(Player&, const VRFrameState&, float dt);
+			/** Where a gun at `from` pointing `dir` aims: the first block or player
+			 * hitbox on the ray, or 128 blocks out. `hit`: it met something. */
+			Vector3 VRGunAimPoint(Player& p, const Vector3& from, const Vector3& dir, bool& hit);
+			/** A gun's shot from the eye this moment (VRGunAimPoint from the eye
+			 * along the gun, or along the scope): its direction, where it lands,
+			 * and whether that is
+			 * on something. Called for the shot and again for the laser, where it
+			 * is drawn, so the laser keeps up with the gun. */
+			Vector3 VRGunShot(Player& p, Vector3& impact, bool& hit);
+			/** The spade or blocks have a block in reach along their ray. */
+			bool VRToolHasReach(Player& p);
+			void UpdateVRRigTransforms(const VRFrameState&, const Vector3& origin);
+			/** Takes and lets go of a gun with the off hand (vr_twoHandedGrip). */
+			void UpdateVRTwoHandedGrip(Player&, const VRFrameState&);
+			/** Points the gun hand from itself to the off hand. */
+			void ApplyVRTwoHandedAim();
+			/** Points the gun hand along `forward`, keeping its roll. */
+			void SetVRToolForward(const Vector3& forward);
+			/** The gun hand's forward turned by the recoil now, if a gun is held. */
+			void ApplyVRRecoil();
+			/** The virtual shoulder, world space, for a stocked gun. */
+			Vector3 VRShoulderPoint() const;
+			/** A two-handed gun's forward: hand to hand, eased to the stock's line
+			 * (shoulder through front hand) as far as the stock has hold. */
+			Vector3 VRTwoHandedForward() const;
+			/** Shoulders and unshoulders the gun, and smooths its aim; once a frame. */
+			void UpdateVRAimAssist(Player&, float dt);
+			/** How far the held tool reaches ahead of the hand, blocks. */
+			float VRToolReach(Player&) const;
+			/** Stops the hands, and the tool in the tool hand, at the map. */
+			void ApplyVRToolCollision();
+
+			/** A button on the wrist menu, in wrist canvas pixels. */
+			struct VRWristButton {
+				enum Kind { Chat, TeamChat, Phrase, QuickTarget, Colour, Menu, Light, Team };
+				Kind kind;
+				int index;
+				AABB2 rect;
+				IntVector3 color;
+			};
+			std::vector<VRWristButton> VRWristMenuLayout() const;
+			/** The wrist menu's pointer and buttons; once a frame. */
+			void UpdateVRWrist(const VRFrameState&, float dt, bool menu);
+			void PressVRWristButton(const VRWristButton&);
+			void DrawVRWristMenu();
+			static const char* VRQuickPhrase(int);
+			/** How much of `offset` the view can move from `eye` before it would
+			 * be inside a block: 0..1. */
+			float VRHeadClearance(const Vector3& eye, const Vector3& offset) const;
+			/** Whether nothing solid lies between `from` and `to`. */
+			bool VRLineOfSight(const Vector3& from, const Vector3& to) const;
+			/** The wrist HUD's health and ammo, large (DrawJoinedAlivePlayerHUD). */
+			void DrawVRWatch(Player&, int clipNum, int stockNum, int clipSize, bool isToolWeapon,
+			                 bool isReloading);
+			/** How long a damage number waits for the server to refuse the hit. */
+			float DamageIndicatorDelay();
+			void DrawVRFrameRate();
+			void DrawVRScopeLens();
+			/** The reflex sight's dot, in the eye being drawn (DrawInEachVREye). */
+			void DrawVRReflexDot();
+			void UpdateVRComfortCamera(float dt);
+			/** The in-eye tip box (the training course's tips, the no-vr_presence
+			 * notice), drawn in the eye being drawn. */
+			void DrawVRTutorial();
+			/** Until when (Client::time) the no-vr_presence notice shows in a headset. */
+			float vrPresenceNoticeUntil = -1.0F;
+			/** When to decide whether to show it (the server's extensions have had
+			 * time to arrive), or -1 once decided. */
+			float vrPresenceCheckAt = -1.0F;
+			void UpdateVRPresenceNotice();
+			/** On the training course (its marker voxel is in the map)? */
+			bool IsOnTrainingCourse();
+			/** The training course's tip for where the local player is, for a
+			 * headset or a monitor; false off the course or without a body. */
+			bool TrainingTip(bool vr, std::string& title, std::string& tip);
+			/** That tip on a monitor, at the top of the screen. */
+			void DrawTrainingTip();
+			/** A tip box: a title line in `accent`, then the text wrapped to
+			 * `layoutW` and drawn `scale` times its size, its top centre at `at`. */
+			void DrawTipBox(const std::string& title, const std::string& text, Vector4 accent,
+			                Vector2 at, float layoutW, float scale);
+			const GameMap* trainingCheckedMap = nullptr;
+			bool trainingCourse = false;
+			/** The comfort vignette, drawn in the eye being drawn. */
+			void DrawVRVignette();
+			Handle<IImage> vrVignetteImage;
+			/** The physical reload (vr_reloadGesture); true to press reload now. */
+			bool UpdateVRReload(Player&, const VRFrameState&);
+			/** The camera modes that move the view with nothing of yours moving. */
+			static bool IsVRComfortMode(ClientCameraMode);
+			/** `deliberate`: the player held both sticks in, rather than the
+			 * runtime or the session asking. */
+			void RecenterVR(const VRFrameState&, bool deliberate);
+			void VRSetKey(const std::string& key, bool down);
+			void VRReleaseAllKeys();
+			Vector3 VRToWorld(const Vector3& trackingVector) const;
+			/** Replaces a flat scene definition's view with the head and the eyes. */
+			void ApplyVRToSceneDefinition(SceneDefinition&, ClientCameraMode);
+			void SendVRPose();
+			/** Rumbles a controller (-1: both) when a headset is in use. */
+			void VRPulse(int hand, float amplitude, float seconds,
+			             VRHapticShape shape = VRHapticShape::Flat);
+			/** True while the player HUD is being drawn onto the wrist panel. */
+			bool vrWristPass = false;
+			void DrawVRWristBackdrop();
+			/** True while drawing into one eye's picture (DrawInEachVREye). */
+			bool vrEyeOverlayPass = false;
+			/** Runs `draw` once per eye, with the projection (`Project`) and the 2D
+			 * canvas set to that eye: what it pins to a place in the world is then
+			 * seen at that place's depth, not on the flat panel. */
+			/** `draw` once in each eye's picture: on canvases 2 and 3, or with
+			 * `firstCanvas` 4 on the headset-only ones (IRenderer::SetVRCanvas). */
+			void DrawInEachVREye(const std::function<void()>& draw, int firstCanvas = 2);
+
 			void DrawScene();
 			void AddGrenadeToScene(Grenade&);
 			void AddDebugObjectToScene(const OBB3&, const Vector4& col = MakeVector4(1, 1, 1, 1));
@@ -844,6 +1154,28 @@ namespace spades {
 			/** What the Teamplay extension has made this client remember. */
 			const Teamplay& GetTeamplay() const { return *teamplay; }
 
+			/** The model sets the Player Models extension has assigned. */
+			const PlayerOutfits& GetPlayerOutfits() const { return playerOutfits; }
+			PlayerOutfits& GetPlayerOutfits() { return playerOutfits; }
+
+			// ── VR ─────────────────────────────────────────────────
+			/** The headset drives the camera this frame. */
+			bool IsVRActive() const { return vrRig.active; }
+			/** Stand height and play space centre from the head as it is next
+			 * frame, as holding both sticks in does. */
+			void RequestVRHeightReset() { vrRig.heightResetRequested = true; }
+			/** The local player's hand this frame, world space; axes are forward,
+			 * right and down. False when the controller is not tracked. */
+			bool GetLocalVRHand(int hand, Vector3& position, Vector3 axes[3]) const;
+			/** The block colour held when the local player last died, if they have. */
+			stmp::optional<IntVector3> GetKeptBlockColor() const { return keptBlockColor; }
+			stmp::optional<IntVector3> keptBlockColor;
+			/** A VR player's latest pose, or null if they sent none lately. */
+			const VRNetPose* GetRemoteVRPose(int playerId) const;
+			/** Called by the net client. */
+			void VRPoseReceived(int playerId, const VRNetPose&);
+			void VRPresenceConfigured(uint8_t flags, uint8_t maxRate);
+
 			void PlayerSentChatMessage(Player&, bool global, const std::string&);
 			void ServerSentMessage(bool system, const std::string&);
 
@@ -894,6 +1226,10 @@ namespace spades {
 
 			/** Called after a player's flashlight was switched, to give the feedback. */
 			void PlayerSwitchedFlashlight(Player&);
+			/** Switches the local player's flashlight, through the server when it
+			 * synchronizes them: the F key, and in a headset the wrist menu's Light
+			 * and a squeeze of the off hand at the head. */
+			void ToggleLocalFlashlight();
 
 			// IWorldListener begin
 			void PlayerObjectSet(int) override;
@@ -901,6 +1237,7 @@ namespace spades {
 			void PlayerJumped(Player&) override;
 			void PlayerLanded(Player&, bool hurt) override;
 			void PlayerFiredWeapon(Player&) override;
+			void PlayerRecoiledInVR(Player&, float yaw, float pitch) override;
 			void PlayerEjectedBrass(Player&) override;
 			void PlayerDryFiredWeapon(Player&) override;
 			void PlayerReloadingWeapon(Player&) override;

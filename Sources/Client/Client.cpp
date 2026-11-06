@@ -24,8 +24,10 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <limits>
 
 #include "Client.h"
+#include <Gui/TrainingHost.h>
 #include "Fonts.h"
 #include <Core/FileManager.h>
 #include <Core/IStream.h>
@@ -177,7 +179,7 @@ namespace spades {
 				void OnWeaponSelected(WeaponType weapon) override { client->OnWeaponSelected(weapon); }
 				void OnSpawnPressed() override { client->OnSpawnPressed(); }
 				void OnClosePressed() override { client->OnClosePressed(); }
-				int GetSelectedTeam() override { return client->limbo->GetSelectedTeam(); }
+				int GetSelectedTeam() override { return client->LimboTeam(); }
 				WeaponType GetSelectedWeapon() override { return client->limbo->GetSelectedWeapon(); }
 				std::string GetTeamName(int teamId) override {
 					if (teamId == 2)
@@ -281,6 +283,7 @@ namespace spades {
 
 			limbo->SetSelectedTeam(2);
 			limbo->SetSelectedWeapon(RIFLE_WEAPON);
+			limboTeamChosen = false;
 			inGameLimbo = false;
 			limboMenu->Close();
 
@@ -846,6 +849,15 @@ namespace spades {
 		void Client::RunFrame(float dt) {
 			SPADES_MARK_FUNCTION();
 
+			// The training course is joined at once, with a rifle (its range and
+			// its scope are part of the course): picking a team there is a step
+			// with nothing to choose. The course has one team.
+			if (!trainingJoined && world && net && !world->GetLocalPlayer() && time > 1.0F &&
+			    gui::TrainingHost::Get().IsActive()) {
+				trainingJoined = true;
+				net->SendJoin(0, RIFLE_WEAPON, playerName, 0);
+			}
+
 			fpsCounter.MarkFrame();
 
 			// waiting for renderer initialization
@@ -932,6 +944,9 @@ namespace spades {
 
 			UpdateDamageIndicators(dt);
 			UpdateAutoFocus(dt);
+
+			// The controllers become this frame's input before the physics runs.
+			UpdateVR(dt);
 
 			if (world) {
 				float gameplayDt = isDemoMode ? dt * demoNet->GetSpeed() : dt;
@@ -1121,7 +1136,7 @@ namespace spades {
 				return;
 
 			WeaponType weap = limbo->GetSelectedWeapon();
-			int team = limbo->GetSelectedTeam();
+			int team = LimboTeam();
 			if (team == 2)
 				team = 255;
 
@@ -1148,8 +1163,29 @@ namespace spades {
 			// set loadout
 			limbo->SetSelectedTeam(team);
 			limbo->SetSelectedWeapon(weap);
+			limboTeamChosen = true;
 			inGameLimbo = false;
 			limboMenu->Close();
+		}
+
+		int Client::SmallerTeam() {
+			int count[2] = {0, 0};
+			if (world) {
+				stmp::optional<Player&> local = world->GetLocalPlayer();
+				for (size_t i = 0; i < world->GetNumPlayerSlots(); i++) {
+					stmp::optional<Player&> p = world->GetPlayer(static_cast<unsigned int>(i));
+					if (!p || (local && &p.value() == &local.value()))
+						continue;
+					const int t = p->GetTeamId();
+					if (t == 0 || t == 1)
+						count[t]++;
+				}
+			}
+			return count[1] < count[0] ? 1 : 0;
+		}
+
+		int Client::LimboTeam() {
+			return limboTeamChosen ? limbo->GetSelectedTeam() : SmallerTeam();
 		}
 
 		void Client::ShowAlert(const std::string& contents, AlertType type) {
@@ -1204,6 +1240,7 @@ namespace spades {
 
 		void Client::OnTeamSelected(int team) {
 			limbo->SetSelectedTeam(team);
+			limboTeamChosen = true;
 		}
 
 		void Client::OnWeaponSelected(WeaponType weapon) {
@@ -1551,6 +1588,19 @@ namespace spades {
 				} else if (alert) {
 					ShowAlert(msg, *alert);
 					return;
+				}
+			}
+
+			// With alerts off, a typed line (Message Types) is still a server line:
+			// shown without the prefix that marks its type, not with "%% " on it.
+			if (!cg_serverAlert) {
+				for (const char* prefix : {CHATPREFIX_BIG, CHATPREFIX_NOTICE, CHATPREFIX_WARNING,
+				                           CHATPREFIX_ERROR}) {
+					if (msg.compare(0, 3, prefix) == 0) {
+						chatWindow->AddMessage(
+						  ChatWindow::ColoredMessage(msg.substr(3), MsgColorSysInfo));
+						return;
+					}
 				}
 			}
 

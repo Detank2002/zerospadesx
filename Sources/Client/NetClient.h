@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -34,6 +35,7 @@
 #include "INetClient.h"
 #include "NetProtocol.h"
 #include "Player.h"
+#include "VRNetProtocol.h"
 #include <Core/Debug.h>
 #include <Core/Math.h>
 #include <Core/ServerAddress.h>
@@ -108,8 +110,13 @@ namespace spades {
 			  {ExtensionTypeDamageMarkers, 1},
 			  {ExtensionTypeTeamplay, 1},
 			  {ExtensionTypePieMenu, 1},
+			  // Every client understands VR poses, headset or not: a player on a
+			  // monitor sees VR players' heads and hands the same as one in VR.
+			  {ExtensionTypeVRPresence, kVRPresenceVersion},
 			  {ExtensionTypeFlashlight, 1},
 			  {ExtensionTypeDaytimeWeather, 1},
+			  {ExtensionTypePieMenu, 1},
+			  {ExtensionTypePlayerOutfit, 1},
 			  {ExtensionTypePlayerLimit, 1},
 			  {ExtensionTypeMessageTypes, 1},
 			  {ExtensionTypeKickReason, 1}};
@@ -156,7 +163,10 @@ namespace spades {
 			void HandleTeamplayPacket(NetPacketReader&);
 			void HandlePieMenuPacket(NetPacketReader&);
 			void HandleDamageMarkerPacket(NetPacketReader&);
+			void HandleVRPresencePacket(NetPacketReader&);
 			void HandleFlashlightPacket(NetPacketReader&);
+			void HandlePlayerOutfitPacket(NetPacketReader&);
+			void WriteInitialPlayerOutfitDemoState();
 			void HandleDaytimeWeatherPacket(NetPacketReader&);
 
 			/** Whether the server negotiated the given extension during the handshake. */
@@ -172,6 +182,9 @@ namespace spades {
 			stmp::optional<Player&> GetLocalPlayerOrNull();
 
 			std::string customKickReasonString;
+			// When it came: a server's chat in the game is kept too, and only
+			// counts as the reason for a disconnect that follows it closely.
+			std::chrono::steady_clock::time_point customKickReasonTime;
 			std::string DisconnectReasonString(uint32_t);
 			void CaptureKickReason(NetPacketReader&);
 
@@ -275,6 +288,12 @@ namespace spades {
 				return HasExtension(ExtensionTypeDamageMarkers);
 			}
 
+			/** Whether the server relays VR poses (runs vr_presence.py). */
+			bool IsVRPresenceAvailable() const {
+				return status == NetClientStatusConnected && HasExtension(ExtensionTypeVRPresence);
+			}
+			/** Unreliable and unsequenced: a lost pose is replaced by the next one. */
+			void SendVRPose(const VRNetPose&);
 			/** Whether the server switches every flashlight, the local player's included,
 			 * using the *Flashlight* extension. */
 			bool IsFlashlightSynchronized() const { return HasExtension(ExtensionTypeFlashlight); }

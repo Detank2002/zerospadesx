@@ -158,6 +158,15 @@ namespace spades {
 			                    client::FontManager* fontManager, HeadingNavIndex* nav = nullptr);
 		};
 
+		/** Every VR setting, so all of them can be changed in the headset. */
+		class VROptionsPanel : public ui::UIElement {
+			Handle<StandardPreferenceLayouter> layouter;
+
+		public:
+			VROptionsPanel(ui::UIManager* manager, const PreferenceViewOptions& options,
+			               client::FontManager* fontManager, HeadingNavIndex* nav = nullptr);
+		};
+
 		class MiscOptionsPanel : public ui::UIElement {
 			Handle<StandardPreferenceLayouter> layouter;
 

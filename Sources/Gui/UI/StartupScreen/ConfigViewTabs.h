@@ -42,6 +42,9 @@ namespace spades {
 			ui::RadioButton* driverOpenGL;
 			ui::RadioButton* driverVulkan;
 			ui::RadioButton* driverSoftware;
+			/** Play in a headset. VR draws with Vulkan, so ticking it picks Vulkan and
+			 * picking another renderer clears it. */
+			ui::CheckBox* vrCheck;
 
 			ui::TextViewer* helpView;
 			// Shared by OpenGL and Vulkan: both drive the same `r_*` cvars, so a second
@@ -52,12 +55,14 @@ namespace spades {
 			Settings::ItemHandle r_renderer;
 			Settings::ItemHandle r_vulkan;
 			Settings::ItemHandle r_fullscreen;
+			Settings::ItemHandle vr_enable;
 
 			void HandleHelpText(const std::string& text);
 			void OnDriverOpenGL(ui::UIElement&);
 			void OnDriverVulkan(ui::UIElement&);
 			void OnDriverSoftware(ui::UIElement&);
 			void OnFullscreenCheck(ui::UIElement&);
+			void OnVRCheck(ui::UIElement&);
 
 		public:
 			StartupScreenGraphicsTab(StartupScreenUI* ui, Vector2 size);

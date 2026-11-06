@@ -28,13 +28,14 @@
 #include <Core/RefCountedObject.h>
 
 namespace spades {
+	class ResourceChanges;
 	namespace draw {
 		class VulkanOptimizedVoxelModel;
 		class VulkanRenderer;
 		class VulkanModelManager : public RefCountedObject {
 			VulkanRenderer& renderer;
-			std::map<std::string, Handle<client::IModel>> models;
-			Handle<client::IModel> CreateModel(const char*);
+			std::map<std::string, Handle<VulkanOptimizedVoxelModel>> models;
+			Handle<VulkanOptimizedVoxelModel> CreateModel(const char*);
 
 		public:
 			VulkanModelManager(VulkanRenderer&);
@@ -42,6 +43,11 @@ namespace spades {
 			Handle<client::IModel> RegisterModel(const char*);
 
 			void ClearCache();
+			/**
+			 * Gives the cached models from a changed file their new content. The
+			 * GPU must be idle: the old geometry is freed.
+			 */
+			void ReloadResources(const ResourceChanges&);
 		};
 	} // namespace draw
 } // namespace spades

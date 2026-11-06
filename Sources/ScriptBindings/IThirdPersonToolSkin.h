@@ -32,5 +32,24 @@ namespace spades {
 			ScriptIThirdPersonToolSkin(asIScriptObject* obj);
 			void SetOriginMatrix(Matrix4 m);
 		};
+
+		/** A gun's skin drawn in a VR player's own hand (optional: a skin without
+		 * it draws there as it does for everyone). With VRHand set it draws the
+		 * first-person gun and its sights, and tells where they are, in the world,
+		 * for the origin matrix it was last given. */
+		class ScriptIVRWeaponSkin {
+			asIScriptObject* obj;
+
+		public:
+			ScriptIVRWeaponSkin(asIScriptObject* obj);
+			bool ImplementsInterface();
+			void SetVRHand(bool);
+			/** The iron sights' line: through the rear notch, to the front sight */
+			Vector3 GetVRSightRear();
+			Vector3 GetVRSightFront();
+			/** The reflex sight's window, and its radius (0: no reflex sight) */
+			Vector3 GetVRReflexCenter();
+			float GetVRReflexRadius();
+		};
 	} // namespace client
 } // namespace spades

@@ -939,9 +939,11 @@ double parseFloat(const string &val, asUINT *byteCount)
 #endif
 #else
 #if !defined(ANDROID) && !defined(__psp2__)
-#endif
+	// (ZeroSpades: this #endif sat before the two calls, so on Android they
+	// restored a locale the set-up above never made, and it did not compile.)
 	uselocale(orig_locale);
 	freelocale(locale);
+#endif
 #endif
 
 	if( byteCount )

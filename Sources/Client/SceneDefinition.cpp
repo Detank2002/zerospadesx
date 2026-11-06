@@ -24,24 +24,33 @@
 
 namespace spades {
 	namespace client {
+		FovTangents SceneDefinition::GetFovTangents() const {
+			if (asymmetric)
+				return tangents;
+			const float x = std::tan(fovX * 0.5F), y = std::tan(fovY * 0.5F);
+			return FovTangents{-x, x, -y, y};
+		}
+
+		// Both projections are glFrustum's, written with the edge tangents (the
+		// edges at the near plane divided by zNear). For a centred view the
+		// third column's x and y are zero and this is the matrix it always was.
 		Matrix4 SceneDefinition::ToOpenGLProjectionMatrix() const {
 			float near = this->zNear;
 			float far = this->zFar;
-			float t = near * std::tan(this->fovY * 0.5F);
-			float r = near * std::tan(this->fovX * 0.5F);
+			const FovTangents f = GetFovTangents();
 			float c = far - near;
 
 			Matrix4 mat;
-			mat.m[0] = 2.0F * near / (2.0F * r);
+			mat.m[0] = 2.0F / f.Width();
 			mat.m[1] = 0.0F;
 			mat.m[2] = 0.0F;
 			mat.m[3] = 0.0F;
 			mat.m[4] = 0.0F;
-			mat.m[5] = 2.0F * near / (2.0F * t);
+			mat.m[5] = 2.0F / f.Height();
 			mat.m[6] = 0.0F;
 			mat.m[7] = 0.0F;
-			mat.m[8] = 0.0F;
-			mat.m[9] = 0.0F;
+			mat.m[8] = (f.right + f.left) / f.Width();
+			mat.m[9] = (f.up + f.down) / f.Height();
 			mat.m[10] = -(far + near) / c;
 			mat.m[11] = -1.0F;
 			mat.m[12] = 0.0F;
@@ -58,21 +67,21 @@ namespace spades {
 			// - Z range [0,1] instead of OpenGL's [-1,1]
 			float near = this->zNear;
 			float far = this->zFar;
-			float t = near * std::tan(this->fovY * 0.5F);
-			float r = near * std::tan(this->fovX * 0.5F);
+			const FovTangents f = GetFovTangents();
 			float c = far - near;
 
 			Matrix4 mat;
-			mat.m[0] = 2.0F * near / (2.0F * r);
+			mat.m[0] = 2.0F / f.Width();
 			mat.m[1] = 0.0F;
 			mat.m[2] = 0.0F;
 			mat.m[3] = 0.0F;
 			mat.m[4] = 0.0F;
-			mat.m[5] = 2.0F * near / (2.0F * t);
+			mat.m[5] = 2.0F / f.Height();
 			mat.m[6] = 0.0F;
 			mat.m[7] = 0.0F;
-			mat.m[8] = 0.0F;
-			mat.m[9] = 0.0F;
+			// Y is flipped by the viewport, not here, so up is still up.
+			mat.m[8] = (f.right + f.left) / f.Width();
+			mat.m[9] = (f.up + f.down) / f.Height();
 			mat.m[10] = -far / c;  // Changed for Vulkan Z [0,1]
 			mat.m[11] = -1.0F;
 			mat.m[12] = 0.0F;

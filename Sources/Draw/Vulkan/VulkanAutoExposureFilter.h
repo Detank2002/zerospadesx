@@ -82,12 +82,16 @@ namespace spades {
 			VkPipeline downsamplePipeline;  // passthrough (bilinear downsample)
 			VkPipeline computeGainPipeline; // gain with SRC_ALPHA blend
 			VkPipeline applyPipeline;       // multiply scene by gain
+			// Multiview: the apply pass over both eyes (the measurement reads the left
+			// eye, as the per-eye path does), made only in multiview.
+			VkRenderPass ppRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline applyPipelineMV = VK_NULL_HANDLE;
 
 			// ---------- Per-frame-slot resources ----------
 			// Descriptor sets and dynamic framebuffers are created each frame and
 			// must not be freed until the GPU has finished with them.  We keep two
 			// slots (matching maxFramesInFlight=2) and recycle them on next use.
-			static constexpr int MAX_FRAME_SLOTS = MaxFramesInFlight;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 
@@ -136,6 +140,7 @@ namespace spades {
 			            VulkanImage* input, VulkanImage* output) override {
 				Filter(cmd, input, output, 0.016f);
 			}
+			bool SupportsLayers() const override { return applyPipelineMV != VK_NULL_HANDLE; }
 
 			// Main entry point called by the post-process chain.
 			void Filter(VkCommandBuffer cmd,

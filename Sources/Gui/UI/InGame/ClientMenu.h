@@ -31,7 +31,7 @@ namespace spades {
 		class ClientUI;
 		class ClientUIHelper;
 
-		/** The in-game escape menu (Back to Game / Chat Log / Setup / Disconnect). */
+		/** The in-game escape menu (Back to Game / Chat Log / Setup / Mods / Disconnect). */
 		class ClientMenu : public gui::ui::UIElement, public gui::IModalMenu {
 			ClientUI* ui;           // weak
 			ClientUIHelper* helper; // weak
@@ -39,14 +39,19 @@ namespace spades {
 			Handle<gui::PreferenceViewPersistedState> preferenceState;
 
 			gui::ui::Label* escHint = nullptr; // weak
+			bool forVR = false; // has the headset's buttons
 
 			void OnBackToGame(gui::ui::UIElement& sender);
 			void OnSetup(gui::ui::UIElement& sender);
+			void OnMods(gui::ui::UIElement& sender);
 			void OnChatLog(gui::ui::UIElement& sender);
 			void OnDisconnect(gui::ui::UIElement& sender);
+			void OnResetHeight(gui::ui::UIElement& sender);
+			void OnControls(gui::ui::UIElement& sender);
 
 		public:
 			ClientMenu(ClientUI* ui);
+			bool IsForVR() const { return forVR; }
 			void HotKey(const std::string& key) override;
 
 			// IModalMenu implementation (UIElement handles input/drawing)

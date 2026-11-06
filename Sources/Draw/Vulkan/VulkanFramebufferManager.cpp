@@ -34,7 +34,9 @@ namespace spades {
 
 		VulkanFramebufferManager::VulkanFramebufferManager(Handle<gui::SDLVulkanDevice> dev,
 		                                                   VulkanSettings& settings,
-		                                                   int renderWidth, int renderHeight)
+		                                                   int renderWidth, int renderHeight,
+		                                                   int views, int foveation,
+		                                                   bool inPassResolve)
 		    : device(dev),
 		      doingPostProcessing(false),
 		      renderWidth(renderWidth),
@@ -60,7 +62,9 @@ namespace spades {
 			// hardware support) once at device creation. > 1 enables the multisample
 			// scene + resolve path; 1 keeps the original single-sample path.
 			sampleCount = device->GetSampleCount();
+			viewCount = views >= 2 ? 2U : 1U;
 			useMSAA = sampleCount > VK_SAMPLE_COUNT_1_BIT;
+			resolveInPass = inPassResolve && useMSAA;
 
 			// Determine color format
 			if (useSRGB) {
@@ -124,6 +128,12 @@ namespace spades {
 				}
 			}
 
+			CreateDensityMap(foveation);
+			// The resolve takes the density map's place in the pass
+			if (densityMapImage)
+				resolveInPass = false;
+			if (resolveInPass)
+				SPLog("The scene pass resolves its colour itself and keeps no depth");
 			CreateRenderPass((int)settings.r_water >= 3);
 
 			// Create main render framebuffer
@@ -133,7 +143,7 @@ namespace spades {
 			    VK_IMAGE_TILING_OPTIMAL,
 			    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 			        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-			    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount);
+			    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount, viewCount);
 			renderColorImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 			renderColorImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
 			                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -151,7 +161,7 @@ namespace spades {
 				renderDepthImage = Handle<VulkanImage>::New(
 				    device, renderWidth, renderHeight, fbDepthFormat,
 				    VK_IMAGE_TILING_OPTIMAL, depthUsage,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount, viewCount);
 				renderDepthImage->CreateImageView(VK_IMAGE_ASPECT_DEPTH_BIT);
 				// The framebuffer needs the stencil aspect too, and a sampled view
 				// may carry only one aspect, so the attachment gets its own view.
@@ -175,8 +185,9 @@ namespace spades {
 				sceneDepthSampleImage = Handle<VulkanImage>::New(
 				    device, renderWidth, renderHeight, VK_FORMAT_R32_SFLOAT,
 				    VK_IMAGE_TILING_OPTIMAL,
-				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT, // ExtractView copies an eye out
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				sceneDepthSampleImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				sceneDepthSampleImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 				                                     VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -187,7 +198,7 @@ namespace spades {
 				    device, renderWidth, renderHeight, kSampledStencilFormat,
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				sceneStencilSampleImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				// An integer image is never filtered
 				sceneStencilSampleImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
@@ -199,7 +210,7 @@ namespace spades {
 				// A depth aspect is 4 bytes a texel in a buffer; the mirror's depth,
 				// the same size, and the scene's stencil, a byte a texel, share it.
 				depthCopyBuffer = Handle<VulkanBuffer>::New(
-				    device, (VkDeviceSize)renderWidth * (VkDeviceSize)renderHeight * 4,
+				    device, (VkDeviceSize)renderWidth * (VkDeviceSize)renderHeight * 4 * viewCount,
 				    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 			}
@@ -212,8 +223,9 @@ namespace spades {
 				    device, renderWidth, renderHeight, fbColorFormat,
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+				        (resolveInPass ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0U),
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				renderColorResolveImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				renderColorResolveImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
 				                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -227,7 +239,7 @@ namespace spades {
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				renderDepthResolveImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				renderDepthResolveImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 				                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -238,21 +250,27 @@ namespace spades {
 				    device, renderWidth, renderHeight, kSampledStencilFormat,
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				renderStencilResolveImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				renderStencilResolveImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 				                                         VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 			}
 
+			// Every scene pass's framebuffer has the density map last, when there is one
+			const VkImageView densityView =
+			  densityMapImage ? densityMapImage->GetImageView() : VK_NULL_HANDLE;
+			const uint32_t densityCount = densityMapImage ? 1 : 0;
+			// or the pass's resolve, which takes its place (there is never both)
 			VkImageView attachments[] = {
 			    renderColorImage->GetImageView(),
-			    renderDepthImage->GetAttachmentImageView()
+			    renderDepthImage->GetAttachmentImageView(),
+			    resolveInPass ? renderColorResolveImage->GetImageView() : densityView
 			};
 
 			VkFramebufferCreateInfo fbInfo = {};
 			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 			fbInfo.renderPass = renderPass;
-			fbInfo.attachmentCount = 2;
+			fbInfo.attachmentCount = 2 + densityCount + (resolveInPass ? 1 : 0);
 			fbInfo.pAttachments = attachments;
 			fbInfo.width = renderWidth;
 			fbInfo.height = renderHeight;
@@ -267,13 +285,14 @@ namespace spades {
 			// Create sprite framebuffer (color-only, for soft sprite rendering)
 			{
 				VkImageView spriteAttachments[] = {
-				    renderColorImage->GetImageView()
+				    renderColorImage->GetImageView(),
+				    densityView
 				};
 
 				VkFramebufferCreateInfo spriteFbInfo = {};
 				spriteFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 				spriteFbInfo.renderPass = spriteRenderPass;
-				spriteFbInfo.attachmentCount = 1;
+				spriteFbInfo.attachmentCount = 1 + densityCount;
 				spriteFbInfo.pAttachments = spriteAttachments;
 				spriteFbInfo.width = renderWidth;
 				spriteFbInfo.height = renderHeight;
@@ -299,7 +318,7 @@ namespace spades {
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount, viewCount);
 				mirrorColorImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				mirrorColorImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
 				                                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -314,7 +333,7 @@ namespace spades {
 				mirrorDepthImage = Handle<VulkanImage>::New(
 				    device, renderWidth, renderHeight, fbDepthFormat,
 				    VK_IMAGE_TILING_OPTIMAL, mirrorDepthUsage,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sampleCount, viewCount);
 				mirrorDepthImage->CreateImageView(VK_IMAGE_ASPECT_DEPTH_BIT);
 				mirrorDepthImage->CreateAttachmentImageView();
 				mirrorDepthImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
@@ -322,13 +341,14 @@ namespace spades {
 
 				VkImageView mirrorAttachments[] = {
 				    mirrorColorImage->GetImageView(),
-				    mirrorDepthImage->GetAttachmentImageView()
+				    mirrorDepthImage->GetAttachmentImageView(),
+				    densityView
 				};
 
 				VkFramebufferCreateInfo mirrorFbInfo = {};
 				mirrorFbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 				mirrorFbInfo.renderPass = renderPass;
-				mirrorFbInfo.attachmentCount = 2;
+				mirrorFbInfo.attachmentCount = 2 + densityCount;
 				mirrorFbInfo.pAttachments = mirrorAttachments;
 				mirrorFbInfo.width = renderWidth;
 				mirrorFbInfo.height = renderHeight;
@@ -346,7 +366,7 @@ namespace spades {
 					    device, renderWidth, renderHeight, VK_FORMAT_R32_SFLOAT,
 					    VK_IMAGE_TILING_OPTIMAL,
 					    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 					mirrorDepthSampleImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 					mirrorDepthSampleImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 					                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -358,7 +378,7 @@ namespace spades {
 					    device, renderWidth, renderHeight, fbColorFormat,
 					    VK_IMAGE_TILING_OPTIMAL,
 					    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 					mirrorColorResolveImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 					mirrorColorResolveImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
 					                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -370,7 +390,7 @@ namespace spades {
 						    device, renderWidth, renderHeight, VK_FORMAT_R32_SFLOAT,
 						    VK_IMAGE_TILING_OPTIMAL,
 						    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-						    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+						    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 						mirrorDepthResolveImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 						mirrorDepthResolveImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 						                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -389,7 +409,7 @@ namespace spades {
 				    device, renderWidth, renderHeight, fbColorFormat,
 				    VK_IMAGE_TILING_OPTIMAL,
 				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 				screenCopyColorImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
 				screenCopyColorImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
 				                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -399,11 +419,30 @@ namespace spades {
 					    device, renderWidth, renderHeight, fbDepthFormat,
 					    VK_IMAGE_TILING_OPTIMAL,
 					    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+					    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
 					screenCopyDepthImage->CreateImageView(VK_IMAGE_ASPECT_DEPTH_BIT);
 					screenCopyDepthImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
 					                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 				}
+			}
+
+			if (viewCount > 1) {
+				postColorImage = Handle<VulkanImage>::New(
+				    device, renderWidth, renderHeight, fbColorFormat, VK_IMAGE_TILING_OPTIMAL,
+				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+				        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				postColorImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
+				postColorImage->CreateSampler(VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+				                              VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+				postDepthImage = Handle<VulkanImage>::New(
+				    device, renderWidth, renderHeight, VK_FORMAT_R32_SFLOAT, VK_IMAGE_TILING_OPTIMAL,
+				    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+				    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+				postDepthImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
+				postDepthImage->CreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
+				                              VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+				SPLog("Multiview: scene targets have 2 layers, one per eye");
 			}
 
 			// Add main render buffer to managed buffers
@@ -495,10 +534,34 @@ namespace spades {
 			depthAttachmentRef.attachment = 1;
 			depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+			// Resolved in the pass (resolveInPass): on a tiled GPU each tile is
+			// resolved on chip and written once at a quarter of the size, where a
+			// stored multisampled image is written whole and then read back for
+			// vkCmdResolveImage. Nothing reads the depth after it either, so the
+			// multisampled colour and the depth are never stored at all.
+			VkAttachmentDescription resolveAttachment = {};
+			resolveAttachment.format = fbColorFormat;
+			resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			VkAttachmentReference resolveAttachmentRef = {};
+			resolveAttachmentRef.attachment = 2;
+			resolveAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			if (resolveInPass) {
+				colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+				depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+				depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			}
+
 			VkSubpassDescription subpass = {};
 			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 			subpass.colorAttachmentCount = 1;
 			subpass.pColorAttachments = &colorAttachmentRef;
+			subpass.pResolveAttachments = resolveInPass ? &resolveAttachmentRef : nullptr;
 			subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
 			// This pass's attachments are reused every frame: the previous frame
@@ -529,11 +592,48 @@ namespace spades {
 			                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
 			                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
-			VkAttachmentDescription attachments[] = {colorAttachment, depthAttachment};
+			// Foveation: the density map, read by every scene pass, never written
+			VkAttachmentDescription densityAttachment = {};
+			densityAttachment.format = VK_FORMAT_R8G8_UNORM;
+			densityAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			densityAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+			densityAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			densityAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			densityAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			densityAttachment.initialLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+			densityAttachment.finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+			const uint32_t densityCount = densityMapImage ? 1 : 0;
+			// The third attachment: the density map's or the resolve's, never both
+			const VkAttachmentDescription& thirdAttachment =
+			  resolveInPass ? resolveAttachment : densityAttachment;
+
+			VkAttachmentDescription attachments[] = {colorAttachment, depthAttachment,
+			                                         thirdAttachment};
+
+			// Multiview: both eyes in each subpass, drawn from one set of commands;
+			// the shaders pick their eye with gl_ViewIndex. The correlation mask
+			// says the views are near each other, which lets a tiled GPU share work.
+			const uint32_t viewMask = viewCount > 1 ? 0x3U : 0U;
+			VkRenderPassMultiviewCreateInfo multiviewInfo = {};
+			multiviewInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
+			multiviewInfo.subpassCount = 1;
+			multiviewInfo.pViewMasks = &viewMask;
+			multiviewInfo.correlationMaskCount = 1;
+			multiviewInfo.pCorrelationMasks = &viewMask;
+
+			VkRenderPassFragmentDensityMapCreateInfoEXT densityInfo = {};
+			densityInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT;
+			densityInfo.pNext = viewCount > 1 ? &multiviewInfo : nullptr;
+			densityInfo.fragmentDensityMapAttachment = {
+			  2, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT};
+			const void* passNext = densityMapImage ? static_cast<const void*>(&densityInfo)
+			                       : viewCount > 1 ? static_cast<const void*>(&multiviewInfo)
+			                                       : nullptr;
 
 			VkRenderPassCreateInfo renderPassInfo = {};
 			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-			renderPassInfo.attachmentCount = 2;
+			renderPassInfo.pNext = passNext;
+			renderPassInfo.attachmentCount = 2 + densityCount + (resolveInPass ? 1 : 0);
 			renderPassInfo.pAttachments = attachments;
 			renderPassInfo.subpassCount = 1;
 			renderPassInfo.pSubpasses = &subpass;
@@ -560,7 +660,8 @@ namespace spades {
 			continueDepthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 			VkAttachmentDescription continueAttachments[] = {continueColorAttachment,
-			                                                 continueDepthAttachment};
+			                                                 continueDepthAttachment,
+			                                                 thirdAttachment};
 
 			VkRenderPassCreateInfo continueRenderPassInfo = renderPassInfo;
 			continueRenderPassInfo.pAttachments = continueAttachments;
@@ -579,7 +680,8 @@ namespace spades {
 			const VkAttachmentStoreOp mirrorDepthStore =
 			  mirrorDepthRead ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			VkRenderPassCreateInfo mirrorRenderPassInfo = renderPassInfo;
-			VkAttachmentDescription mirrorAttachments[2];
+			VkAttachmentDescription mirrorAttachments[3];
+			mirrorAttachments[2] = thirdAttachment;
 			mirrorRenderPassInfo.pAttachments = mirrorAttachments;
 			const VkAttachmentDescription* sources[3] = {attachments, attachments,
 			                                             continueAttachments};
@@ -618,10 +720,17 @@ namespace spades {
 			spriteDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 			spriteDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
+			VkAttachmentDescription spriteAttachments[] = {spriteColorAttachment, densityAttachment};
+			VkRenderPassFragmentDensityMapCreateInfoEXT spriteDensityInfo = densityInfo;
+			spriteDensityInfo.fragmentDensityMapAttachment.attachment = 1;
+
 			VkRenderPassCreateInfo spriteRenderPassInfo = {};
 			spriteRenderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-			spriteRenderPassInfo.attachmentCount = 1;
-			spriteRenderPassInfo.pAttachments = &spriteColorAttachment;
+			spriteRenderPassInfo.pNext = densityMapImage ? static_cast<const void*>(&spriteDensityInfo)
+			                             : viewCount > 1 ? static_cast<const void*>(&multiviewInfo)
+			                                             : nullptr;
+			spriteRenderPassInfo.attachmentCount = 1 + densityCount;
+			spriteRenderPassInfo.pAttachments = spriteAttachments;
 			spriteRenderPassInfo.subpassCount = 1;
 			spriteRenderPassInfo.pSubpasses = &spriteSubpass;
 			spriteRenderPassInfo.dependencyCount = 1;
@@ -630,6 +739,164 @@ namespace spades {
 			if (vkCreateRenderPass(vkDevice, &spriteRenderPassInfo, nullptr, &spriteRenderPass) != VK_SUCCESS) {
 				SPRaise("Failed to create Vulkan sprite render pass");
 			}
+		}
+
+		void VulkanFramebufferManager::CreateDensityMap(int foveation) {
+			if (foveation <= 0 || !device->HasFragmentDensityMap())
+				return;
+			const VkExtent2D texel = device->GetFragmentDensityTexelSize();
+			if (texel.width == 0 || texel.height == 0)
+				return;
+			// A texel for each texel-sized block of the targets, at the smallest
+			// texel the device uses (GetFragmentDensityTexelSize)
+			const uint32_t w = (static_cast<uint32_t>(renderWidth) + texel.width - 1) / texel.width;
+			const uint32_t h =
+			  (static_cast<uint32_t>(renderHeight) + texel.height - 1) / texel.height;
+			densityMapImage = Handle<VulkanImage>::New(
+			  device, w, h, VK_FORMAT_R8G8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+			  VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+			  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_SAMPLE_COUNT_1_BIT, viewCount);
+			densityMapImage->CreateImageView(VK_IMAGE_ASPECT_COLOR_BIT);
+
+			// Full density in the middle of each eye, then half (2x2 pixels a
+			// shade), then a quarter (4x4) toward the edges, which a headset's
+			// lenses blur anyway. Measured from the middle of the image, the
+			// height counting a little more, in rings set by the level.
+			static const float kRings[3][2] = {{0.70F, 2.0F}, {0.50F, 0.80F}, {0.38F, 0.65F}};
+			const float* ring = kRings[std::min(foveation, 3) - 1];
+			std::vector<uint8_t> texels(static_cast<size_t>(w) * h * 2 * viewCount);
+			for (uint32_t layer = 0; layer < viewCount; layer++)
+				for (uint32_t y = 0; y < h; y++)
+					for (uint32_t x = 0; x < w; x++) {
+						const float u = ((x + 0.5F) / w) * 2.0F - 1.0F;
+						const float v = (((y + 0.5F) / h) * 2.0F - 1.0F) * 1.15F;
+						const float r = std::sqrt(u * u + v * v);
+						const uint8_t d = r < ring[0] ? 255 : r < ring[1] ? 128 : 64;
+						uint8_t* t = &texels[((static_cast<size_t>(layer) * h + y) * w + x) * 2];
+						t[0] = d; // across
+						t[1] = d; // down
+					}
+			densityMapUpload = Handle<VulkanBuffer>::New(
+			  device, texels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			densityMapUpload->UpdateData(texels.data(), texels.size());
+			SPLog("Foveation %d: a %ux%u density map, %ux%u pixels a texel", foveation, w, h,
+			      texel.width, texel.height);
+		}
+
+		void VulkanFramebufferManager::RecordDensityMapUpload(VkCommandBuffer commandBuffer) {
+			if (!densityMapImage || densityMapUploaded)
+				return;
+			densityMapUploaded = true;
+			VkImageMemoryBarrier b{};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = densityMapImage->GetImage();
+			b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, viewCount};
+			b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+			VkBufferImageCopy copy{};
+			copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
+			copy.imageExtent = {densityMapImage->GetWidth(), densityMapImage->GetHeight(), 1};
+			vkCmdCopyBufferToImage(commandBuffer, densityMapUpload->GetBuffer(),
+			                       densityMapImage->GetImage(),
+			                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+			b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			b.newLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+			b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			b.dstAccessMask = VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
+			vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                     VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT, 0, 0, nullptr,
+			                     0, nullptr, 1, &b);
+		}
+
+		void VulkanFramebufferManager::ExtractView(VkCommandBuffer cmd, int view, bool withColor) {
+			SPADES_MARK_FUNCTION();
+			// The resolved scene: under MSAA the resolve targets, otherwise the
+			// colour attachment and the sampled depth copy.
+			VulkanImage* srcDepth = useMSAA ? renderDepthResolveImage.GetPointerOrNull()
+			                                : sceneDepthSampleImage.GetPointerOrNull();
+			VulkanImage* srcColor = useMSAA ? renderColorResolveImage.GetPointerOrNull()
+			                                : renderColorImage.GetPointerOrNull();
+			if (viewCount < 2 || !postColorImage || !srcDepth || !srcColor)
+				return;
+			const uint32_t layer = static_cast<uint32_t>(view);
+			struct Pair {
+				VkImage src, dst;
+			} pairs[2] = {{srcDepth->GetImage(), postDepthImage->GetImage()},
+			              {srcColor->GetImage(), postColorImage->GetImage()}};
+			int count = withColor ? 2 : 1;
+			// A pass resolved in itself has no depth to copy (nothing reads it)
+			if (resolveInPass) {
+				extractedView = view;
+				if (!withColor)
+					return;
+				pairs[0] = pairs[1];
+				count = 1;
+			}
+			VkImageMemoryBarrier pre[4] = {};
+			for (int i = 0; i < count; i++) {
+				VkImageMemoryBarrier& a = pre[i * 2];
+				a.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				a.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				a.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				a.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+				                  VK_ACCESS_TRANSFER_WRITE_BIT;
+				a.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+				a.srcQueueFamilyIndex = a.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				a.image = pairs[i].src;
+				a.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
+				VkImageMemoryBarrier& b = pre[i * 2 + 1];
+				b = a;
+				// Last read by the previous eye's chain, or last frame's.
+				b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+				b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+				b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				b.image = pairs[i].dst;
+			}
+			vkCmdPipelineBarrier(cmd,
+			                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+			                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, count * 2, pre);
+			for (int i = 0; i < count; i++) {
+				VkImageCopy region{};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.extent = {static_cast<uint32_t>(renderWidth), static_cast<uint32_t>(renderHeight), 1};
+				vkCmdCopyImage(cmd, pairs[i].src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pairs[i].dst,
+				               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+			}
+			VkImageMemoryBarrier post[4] = {};
+			for (int i = 0; i < count; i++) {
+				VkImageMemoryBarrier& a = post[i * 2];
+				a.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				a.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				a.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				a.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+				a.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+				a.srcQueueFamilyIndex = a.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				a.image = pairs[i].src;
+				a.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
+				VkImageMemoryBarrier& b = post[i * 2 + 1];
+				b = a;
+				b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+				b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				b.image = pairs[i].dst;
+			}
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                     0, 0, nullptr, 0, nullptr, count * 2, post);
+			extractedView = view;
+		}
+
+		VkImageView VulkanFramebufferManager::GetResolvedStencilView() {
+			VulkanImage& stencil = *GetResolvedStencilImage();
+			return extractedView >= 0 ? stencil.GetLayerView(static_cast<uint32_t>(extractedView))
+			                          : stencil.GetImageView();
 		}
 
 		void VulkanFramebufferManager::PrepareSceneRendering(VkCommandBuffer commandBuffer) {
@@ -678,6 +945,27 @@ namespace spades {
 			VkImage msColor = renderColorImage->GetImage();
 			VkImage resolved = renderColorResolveImage->GetImage();
 
+			if (resolveInPass) {
+				// The pass resolved it, leaving it SHADER_READ_ONLY: only make the
+				// resolve's writes visible to the chain (its reads and its copies)
+				VkImageMemoryBarrier visible{};
+				visible.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				visible.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				visible.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				visible.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				visible.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				visible.image = resolved;
+				visible.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+				                            VK_REMAINING_ARRAY_LAYERS};
+				visible.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+				visible.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+				vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+				                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+				                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+				                     0, 0, nullptr, 0, nullptr, 1, &visible);
+				return;
+			}
+
 			// Multisampled colour: currentColorLayout -> TRANSFER_SRC.
 			VkImageMemoryBarrier toSrc{};
 			toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -686,7 +974,7 @@ namespace spades {
 			toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toSrc.image = msColor;
-			toSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			toSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
 			toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -698,7 +986,7 @@ namespace spades {
 			toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toDst.image = resolved;
-			toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			toDst.srcAccessMask = 0;
 			toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -709,8 +997,8 @@ namespace spades {
 				0, 0, nullptr, 0, nullptr, 2, pre);
 
 			VkImageResolve region{};
-			region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
+			region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
 			region.extent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 			vkCmdResolveImage(commandBuffer,
 				msColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -725,7 +1013,7 @@ namespace spades {
 			toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toRead.image = resolved;
-			toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			vkCmdPipelineBarrier(commandBuffer,
@@ -754,7 +1042,7 @@ namespace spades {
 			pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[0].image = msColor;
-			pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			pre[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
 			pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -764,7 +1052,7 @@ namespace spades {
 			pre[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[1].image = resolved;
-			pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			pre[1].srcAccessMask = 0;
 			pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -774,8 +1062,8 @@ namespace spades {
 				0, 0, nullptr, 0, nullptr, 2, pre);
 
 			VkImageResolve region{};
-			region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
+			region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
 			region.extent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 			vkCmdResolveImage(commandBuffer,
 				msColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -788,7 +1076,7 @@ namespace spades {
 			toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			toRead.image = resolved;
-			toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			vkCmdPipelineBarrier(commandBuffer,
@@ -818,7 +1106,7 @@ namespace spades {
 				pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				pre[0].image = srcColor;
-				pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				pre[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 				pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -828,7 +1116,7 @@ namespace spades {
 				pre[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				pre[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				pre[1].image = dstColor;
-				pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 				pre[1].srcAccessMask = 0;
 				pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -837,8 +1125,8 @@ namespace spades {
 					0, 0, nullptr, 0, nullptr, 2, pre);
 
 				VkImageResolve region{};
-				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
 				region.extent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 				vkCmdResolveImage(commandBuffer,
 					srcColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -871,7 +1159,7 @@ namespace spades {
 			srcBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			srcBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			srcBarriers[0].image = renderColorImage->GetImage();
-			srcBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			srcBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			srcBarriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			srcBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -882,7 +1170,7 @@ namespace spades {
 			srcBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			srcBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			srcBarriers[1].image = renderDepthImage->GetImage();
-			srcBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, 1};
+			srcBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			srcBarriers[1].srcAccessMask = useMSAA ? VK_ACCESS_SHADER_READ_BIT
 			                                       : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			srcBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -895,7 +1183,7 @@ namespace spades {
 			dstBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			dstBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			dstBarriers[0].image = screenCopyColorImage->GetImage();
-			dstBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			dstBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			dstBarriers[0].srcAccessMask = 0;
 			dstBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -905,7 +1193,7 @@ namespace spades {
 			dstBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			dstBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			dstBarriers[1].image = screenCopyDepthImage->GetImage();
-			dstBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, 1};
+			dstBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			dstBarriers[1].srcAccessMask = 0;
 			dstBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -917,8 +1205,8 @@ namespace spades {
 
 			// Copy color
 			VkImageCopy colorCopy = {};
-			colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			colorCopy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
+			colorCopy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, viewCount};
 			colorCopy.extent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 			vkCmdCopyImage(commandBuffer,
 			               renderColorImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -927,8 +1215,8 @@ namespace spades {
 
 			// Copy depth
 			VkImageCopy depthCopy = {};
-			depthCopy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-			depthCopy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+			depthCopy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, viewCount};
+			depthCopy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, viewCount};
 			depthCopy.extent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 			vkCmdCopyImage(commandBuffer,
 			               renderDepthImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -943,7 +1231,7 @@ namespace spades {
 			postBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[0].image = renderColorImage->GetImage();
-			postBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			postBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			postBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 			postBarriers[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
@@ -953,7 +1241,7 @@ namespace spades {
 			postBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[1].image = renderDepthImage->GetImage();
-			postBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, 1};
+			postBarriers[1].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			postBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 			postBarriers[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
@@ -963,7 +1251,7 @@ namespace spades {
 			postBarriers[2].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[2].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[2].image = screenCopyColorImage->GetImage();
-			postBarriers[2].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			postBarriers[2].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			postBarriers[2].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			postBarriers[2].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -973,7 +1261,7 @@ namespace spades {
 			postBarriers[3].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			postBarriers[3].image = screenCopyDepthImage->GetImage();
-			postBarriers[3].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, 1};
+			postBarriers[3].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
 			postBarriers[3].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			postBarriers[3].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -1030,7 +1318,7 @@ namespace spades {
 			pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			pre[0].image = depth.GetImage();
-			pre[0].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, 1};
+			pre[0].subresourceRange = {DepthStencilBarrierAspects(fbDepthFormat), 0, 1, 0, viewCount};
 			pre[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
@@ -1042,7 +1330,7 @@ namespace spades {
 			pre[1].image = sample.GetImage();
 			// R32F or R8_UINT color target (not D32 depth) — see the sample images'
 			// creation.
-			pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			pre[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, viewCount};
 			pre[1].srcAccessMask = 0;
 			pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -1056,9 +1344,10 @@ namespace spades {
 
 			// The aspect into the buffer, tightly packed from its start: the depth a
 			// 32-bit float a texel for D32_SFLOAT_S8_UINT, the stencil a byte; then
-			// the buffer, bit for bit, into the R32F or R8_UINT image
+			// the buffer, bit for bit, into the R32F or R8_UINT image. Multiview: every
+			// eye's layer, one after another.
 			VkBufferImageCopy depthCopy{};
-			depthCopy.imageSubresource = {static_cast<VkImageAspectFlags>(aspect), 0, 0, 1};
+			depthCopy.imageSubresource = {static_cast<VkImageAspectFlags>(aspect), 0, 0, viewCount};
 			depthCopy.imageExtent = {(uint32_t)renderWidth, (uint32_t)renderHeight, 1};
 			vkCmdCopyImageToBuffer(commandBuffer, depth.GetImage(),
 			                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1179,13 +1468,14 @@ namespace spades {
 
 			VkImageView attachments[] = {
 			    colorImage->GetImageView(),
-			    depthImage->GetAttachmentImageView()
+			    depthImage->GetAttachmentImageView(),
+			    densityMapImage ? densityMapImage->GetImageView() : VK_NULL_HANDLE
 			};
 
 			VkFramebufferCreateInfo fbInfo = {};
 			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 			fbInfo.renderPass = renderPass;
-			fbInfo.attachmentCount = 2;
+			fbInfo.attachmentCount = densityMapImage ? 3 : 2;
 			fbInfo.pAttachments = attachments;
 			fbInfo.width = w;
 			fbInfo.height = h;

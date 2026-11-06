@@ -49,6 +49,12 @@ namespace spades {
 			Client* client;
 			IRenderer& renderer;
 			IFont* font;
+			// The font and size SetTextScale gave (the wrist panel's), else the
+			// window's own at 1
+			IFont* baseFont;
+			float textScale = 1.0F;
+			// From the chat's last line to the bottom of what it is drawn on
+			float bottomMargin = 64.0F;
 
 			struct ChatEntry {
 				std::string msg;
@@ -63,6 +69,11 @@ namespace spades {
 
 			std::list<ChatEntry> entries;
 			float firstY;
+			// The height of the surface last drawn on. Update() lays the lines
+			// out before Draw() runs, and in a headset Draw() is on the wrist
+			// panel, not the window.
+			float layoutHeight = 0.0F;
+			float LayoutHeight();
 			bool killfeed;
 
 			float GetWidth();
@@ -91,6 +102,12 @@ namespace spades {
 
 			void Update(float dt);
 			void Draw();
+
+			/** Draws in `scaledFont` with lines and images `scale` times their size
+			 * (the wrist panel's larger text); nullptr, 1: the window's own. */
+			void SetTextScale(IFont* scaledFont, float scale);
+			/** The room under the chat's last line (the wrist's watch face). */
+			void SetBottomMargin(float margin) { bottomMargin = margin; }
 		};
 	} // namespace client
 } // namespace spades

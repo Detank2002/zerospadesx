@@ -24,6 +24,7 @@
 
 #include <Core/Settings.h>
 #include <Gui/UI/Settings/Formatters.h>
+#include <Gui/UI/Settings/QualityPresets.h>
 #include <Gui/UI/Widgets/Button.h>
 #include <Gui/UI/Widgets/Field.h>
 #include <Gui/UI/Widgets/Label.h>
@@ -128,6 +129,28 @@ namespace spades {
 			                              const std::string& groupName, float x, float y, float z);
 			bool IsSelected() override;
 			void SetValue() override;
+		};
+
+		/** Toggle button applying a quality level (QualityPresets.h). */
+		class QualityPresetButton : public ConfigToggleButtonBase {
+			QualityPreset preset;
+
+		public:
+			QualityPresetButton(ui::UIManager* manager, const std::string& caption,
+			                    const std::string& groupName, QualityPreset preset);
+			bool IsSelected() override;
+			void SetValue() override;
+		};
+
+		/** Lit while the settings match none of the levels; choosing it changes nothing. */
+		class QualityPresetCustomButton : public ConfigToggleButtonBase {
+			std::vector<QualityPreset> presets;
+
+		public:
+			QualityPresetCustomButton(ui::UIManager* manager, const std::string& caption,
+			                          const std::string& groupName,
+			                          std::vector<QualityPreset> presets);
+			bool IsSelected() override;
 		};
 	} // namespace gui
 } // namespace spades

@@ -62,6 +62,15 @@ namespace spades {
 			return ui && ui->client && ui->client->IsDemoMode();
 		}
 
+		bool ClientUIHelper::IsVRActive() const {
+			return ui && ui->client && ui->client->IsVRActive();
+		}
+
+		void ClientUIHelper::ResetVRHeight() {
+			if (ui && ui->client)
+				ui->client->RequestVRHeightReset();
+		}
+
 		float ClientUIHelper::GetClientTime() const {
 			return (ui && ui->client) ? ui->client->GetTime() : 0.0F;
 		}

@@ -29,6 +29,7 @@
 #include <Core/Exception.h>
 #include <Core/FileManager.h>
 #include <Core/IStream.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -65,19 +66,6 @@ namespace spades {
 				vkDestroyDescriptorSetLayout(vkDevice, descriptorSetLayout, nullptr);
 			}
 
-		}
-
-		void VulkanImageRenderer::Discard() {
-			currentClip = BatchClip{};
-			for (Batch& batch : batches)
-				batch.image->Release();
-			batches.clear();
-			vertices.clear();
-			indices.clear();
-			if (image) {
-				image->Release();
-				image = nullptr;
-			}
 		}
 
 		void VulkanImageRenderer::DestroyPerImageResources() {
@@ -312,11 +300,23 @@ namespace spades {
 			SPLog("Created %zu descriptor pools (one per swapchain image)", perFrameDescriptorPools.size());
 		}
 
-		VkRect2D VulkanImageRenderer::FullScissor() const {
-			VkRect2D r{};
-			r.offset = {0, 0};
-			r.extent = device->GetSwapchainExtent();
-			return r;
+		VkExtent2D VulkanImageRenderer::SurfaceExtent() const {
+			if (fixedExtent.width != 0)
+				return fixedExtent;
+			return renderer.GetUIExtent();
+		}
+
+		void VulkanImageRenderer::Discard() {
+			FinishCurrentBatch();
+			currentClip = BatchClip{};
+			// Nothing recorded has seen these images, so their references can go
+			// now rather than with a frame slot.
+			for (auto& batch : batches)
+				if (batch.image)
+					batch.image->Release();
+			batches.clear();
+			vertices.clear();
+			indices.clear();
 		}
 
 		void VulkanImageRenderer::FinishCurrentBatch() {
@@ -358,24 +358,9 @@ namespace spades {
 
 			FinishCurrentBatch();
 
-			// Screen coordinates map 1:1 onto framebuffer pixels here: the
-			// vertex shader divides by the swapchain extent and the viewport is
-			// Y-flipped, so screen (0, 0) is the top-left pixel, same as the
-			// scissor's origin. Clamp to the surface, as Vulkan rejects a
-			// scissor reaching outside the framebuffer.
-			const VkRect2D full = FullScissor();
-			const float maxX = static_cast<float>(full.extent.width);
-			const float maxY = static_cast<float>(full.extent.height);
-
-			float x0 = Clamp(floorf(rect.GetMinX()), 0.0f, maxX);
-			float y0 = Clamp(floorf(rect.GetMinY()), 0.0f, maxY);
-			float x1 = Clamp(ceilf(rect.GetMaxX()), x0, maxX);
-			float y1 = Clamp(ceilf(rect.GetMaxY()), y0, maxY);
-
-			VkRect2D scissor{};
-			scissor.offset = {static_cast<int32_t>(x0), static_cast<int32_t>(y0)};
-			scissor.extent = {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)};
-			currentClip.scissor = scissor;
+			// Kept in layout pixels; Flush turns it into a scissor on whatever
+			// surface it records onto.
+			currentClip.rect = rect;
 			currentClip.hasScissor = true;
 		}
 
@@ -570,7 +555,8 @@ namespace spades {
 			indices.push_back(idx + 3);
 		}
 
-	void VulkanImageRenderer::Flush(VkCommandBuffer commandBuffer, uint32_t frameIndex) {
+	void VulkanImageRenderer::Flush(VkCommandBuffer commandBuffer, uint32_t frameIndex,
+	                                VkExtent2D target) {
 		SPADES_MARK_FUNCTION();
 
 		// Add current vertices as final batch if not empty
@@ -688,26 +674,51 @@ namespace spades {
 		// Bind pipeline once (all batches use the same pipeline)
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-		// Use the actual swapchain extent as the authoritative UI surface size.
-		// renderer.ScreenWidth()/ScreenHeight() may be stale after a swapchain resize
-		// and may differ from the physical pixel size on HiDPI displays.
-		VkExtent2D uiExtent = device->GetSwapchainExtent();
+		// The layout the client drew in: the swapchain extent on a monitor (the
+		// authoritative size there: ScreenWidth()/ScreenHeight() may be stale
+		// after a resize, or differ from the pixels on HiDPI displays), or the
+		// fixed layout of a headset panel. Vertices are in these units.
+		VkExtent2D uiExtent = SurfaceExtent();
 		float invUIWidth  =  2.0f / static_cast<float>(uiExtent.width);
 		float invUIHeight = -2.0f / static_cast<float>(uiExtent.height);
 
+		// The surface drawn into. The viewport stretches the layout over it, so
+		// only the scissor and the circular clip (which the fragment shader
+		// tests against gl_FragCoord) need converting to its pixels.
+		if (target.width == 0 || target.height == 0)
+			target = uiExtent;
+		const float toTargetX = static_cast<float>(target.width) / static_cast<float>(uiExtent.width);
+		const float toTargetY = static_cast<float>(target.height) / static_cast<float>(uiExtent.height);
+
 		VkViewport viewport{};
 		viewport.x = 0.0f;
-		viewport.y = static_cast<float>(uiExtent.height);
-		viewport.width = static_cast<float>(uiExtent.width);
-		viewport.height = -static_cast<float>(uiExtent.height);
+		viewport.y = static_cast<float>(target.height);
+		viewport.width = static_cast<float>(target.width);
+		viewport.height = -static_cast<float>(target.height);
 		viewport.minDepth = 0.0f;
 		viewport.maxDepth = 1.0f;
 		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
 		VkRect2D fullScissor{};
 		fullScissor.offset = {0, 0};
-		fullScissor.extent = uiExtent;
+		fullScissor.extent = target;
 		vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
+
+		// Screen (0, 0) is the top-left pixel here, as it is the scissor's origin
+		// (the viewport is Y-flipped). Clamped to the surface, as Vulkan rejects
+		// a scissor reaching outside the framebuffer.
+		auto toScissor = [&](const AABB2& rect) {
+			const float maxX = static_cast<float>(target.width);
+			const float maxY = static_cast<float>(target.height);
+			float x0 = Clamp(floorf(rect.GetMinX() * toTargetX), 0.0f, maxX);
+			float y0 = Clamp(floorf(rect.GetMinY() * toTargetY), 0.0f, maxY);
+			float x1 = Clamp(ceilf(rect.GetMaxX() * toTargetX), x0, maxX);
+			float y1 = Clamp(ceilf(rect.GetMaxY() * toTargetY), y0, maxY);
+			VkRect2D s{};
+			s.offset = {static_cast<int32_t>(x0), static_cast<int32_t>(y0)};
+			s.extent = {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)};
+			return s;
+		};
 
 		// Bind the consolidated buffers once
 		VkBuffer vertexBuffers[] = {consolidatedVertexBuffer->GetBuffer()};
@@ -777,7 +788,8 @@ namespace spades {
 
 			// Rectangular clip. Scissor is dynamic state, so this costs nothing
 			// but a command and cannot invalidate the pipeline.
-			const VkRect2D& batchScissor = info.clip.hasScissor ? info.clip.scissor : fullScissor;
+			const VkRect2D batchScissor =
+			  info.clip.hasScissor ? toScissor(info.clip.rect) : fullScissor;
 			vkCmdSetScissor(commandBuffer, 0, 1, &batchScissor);
 
 			// Push constants for screen size, texture size and circular clip
@@ -786,9 +798,10 @@ namespace spades {
 			pushConstants.invScreenSizeFactored[1] = invUIHeight;
 			pushConstants.invTextureSize[0] = 1.0f / static_cast<float>(info.image->GetWidth());
 			pushConstants.invTextureSize[1] = 1.0f / static_cast<float>(info.image->GetHeight());
-			pushConstants.clipCircleCenter[0] = info.clip.circleCenter.x;
-			pushConstants.clipCircleCenter[1] = info.clip.circleCenter.y;
-			pushConstants.clipCircleRadius = info.clip.circleRadius;
+			pushConstants.clipCircleCenter[0] = info.clip.circleCenter.x * toTargetX;
+			pushConstants.clipCircleCenter[1] = info.clip.circleCenter.y * toTargetY;
+			pushConstants.clipCircleRadius =
+			  info.clip.circleRadius * std::min(toTargetX, toTargetY);
 
 			vkCmdPushConstants(commandBuffer, pipelineLayout,
 				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

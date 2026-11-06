@@ -40,6 +40,9 @@ namespace spades {
 
 			void Update(Bitmap& bmp, int x, int y) override;
 
+			/** Takes the image of `other`, which gets this wrapper's old one. */
+			void Replace(VulkanImageWrapper& other);
+
 			float GetWidth() override { return width; }
 			float GetHeight() override { return height; }
 

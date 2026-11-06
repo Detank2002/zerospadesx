@@ -230,6 +230,12 @@ namespace spades {
 					SPAssert(maybePlayer);
 
 					Player& p = maybePlayer.value();
+					if (p.IsAlive() && vrRig.active) {
+						// In a headset the head aims; the mouse turns the body, for
+						// playing seated at a desk.
+						vrRig.bodyYaw += x * 0.003F * (float)cg_mouseSensitivity;
+						break;
+					}
 					if (p.IsAlive()) {
 						float sensitivity = cg_mouseSensitivity;
 
@@ -917,7 +923,7 @@ namespace spades {
 						}
 
 						if (CheckKey(cg_keySpawnCorpse, name) && down && cg_debugCorpse) {
-							auto corp = stmp::make_unique<Corpse>(*renderer, *map, p, isChristmasOn);
+							auto corp = stmp::make_unique<Corpse>(*renderer, *map, p, isChristmasOn, &playerOutfits);
 							corp->AddImpulse(p.GetFront() * 32.0F);
 							corpses.emplace_back(std::move(corp));
 							RemoveCorpses();
@@ -956,7 +962,8 @@ namespace spades {
 				} else if (CheckKey(cg_keySprint, name)) {
 					playerInput.sprint = down;
 				} else if (CheckKey(cg_keySneak, name)) {
-					playerInput.sneak = down;
+					// Not in a headset: there it is the off hand's Y (Client_VR.cpp).
+					playerInput.sneak = down && !IsVRActive();
 				} else if (CheckKey(cg_keyJump, name)) {
 					playerInput.jump = down;
 				} else if (CheckKey(cg_keyAttack, name)) {
@@ -1116,16 +1123,7 @@ namespace spades {
 				} else if (CheckKey(cg_keySaveMap, name) && down) {
 					TakeMapShot();
 				} else if (CheckKey(cg_keyFlashlight, name) && down) {
-					// spectators and dead players shouldn't be able to toggle the flashlight
-					if (!localPlayerIsSpectator && localPlayerIsAlive) {
-						if (net->IsFlashlightSynchronized()) {
-							// The switch the server relays back lights it.
-							net->SendFlashlight(!p.IsFlashlightOn());
-						} else {
-							p.SetFlashlightOn(!p.IsFlashlightOn());
-							PlayerSwitchedFlashlight(p);
-						}
-					}
+					ToggleLocalFlashlight();
 				} else if (CheckKey(cg_keyAutoFocus, name) && down && cg_manualFocus) {
 					autoFocusEnabled = true;
 				} else if ((name == "WheelUp" || name == "WheelDown") && down) {

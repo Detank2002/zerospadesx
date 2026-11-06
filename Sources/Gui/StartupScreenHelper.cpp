@@ -30,7 +30,9 @@
 #include <sys/stat.h>
 #endif
 
+#if USE_OPENGL
 #include <Imports/OpenGL.h> //for gpu info
+#endif
 #include <Imports/SDL.h>
 #include <json/json.h>
 
@@ -51,6 +53,9 @@
 #include <Gui/Utils/Icon.h>
 #include <Gui/Main.h>
 #include <ZeroSpades.h>
+#if USE_OPENXR
+#include <VR/OpenXRSystem.h>
+#endif
 
 SPADES_SETTING(r_bloom);
 SPADES_SETTING(r_cameraBlur);
@@ -204,6 +209,7 @@ namespace spades {
 				modes.push_back(spades::MakeIntVector3(1920, 1080, 0));
 			}
 
+#if USE_OPENGL
 			bool capable = true;
 			SDL_Window* window = SDL_CreateWindow("ZeroSpades: Please wait...", 1, 1, 1, 1,
 												  SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS);
@@ -670,20 +676,37 @@ namespace spades {
 			}
 
 			SPLog("OpenGL driver is OpenSpades capable: %s", capable ? "YES" : "NO");
+#else
+			// Built without the OpenGL renderer (USE_OPENGL=OFF: Android, and the
+			// CI builds that stand in for it). The quality limits the probe would
+			// set are OpenGL's; the Vulkan renderer has its own checks.
+			bool capable = false;
+			shaderHighCapable = true;
+			postFilterHighCapable = true;
+			particleHighCapable = true;
+#endif
 
 			openGLCapable = capable;
 			if (!openGLCapable) {
 				if (spades::EqualsIgnoringCase(r_renderer, "gl")) {
+#if USE_OPENGL
 					SPLog("Switched to software renderer");
 					r_renderer = "sw";
+#else
+					r_renderer = "vulkan";
+#endif
 				}
 
 				incapableConfigs.insert(
 				  std::make_pair("r_renderer", [](std::string value) -> std::string {
 					  if (spades::EqualsIgnoringCase(value, "gl")) {
+#if USE_OPENGL
 						  return "OpenGL renderer is disabled because "
 								 "your video card/driver doesn't support "
 								 "at least one of required OpenGL extensions/features.";
+#else
+						  return "This build has no OpenGL renderer.";
+#endif
 					  } else {
 						  return std::string();
 					  }
@@ -877,6 +900,33 @@ namespace spades {
 				}
 			}
 #endif
+
+			// VR: only the runtime is asked about. The headset itself may be switched
+			// on after the launcher, and the game falls back to the monitor if it is
+			// not there when the game starts.
+			{
+				AddReport("VR (OpenXR):");
+				AddReport();
+				std::string why;
+#if USE_OPENXR
+				std::string runtime = vr::OpenXRSystem::ProbeRuntime(why);
+#else
+				std::string runtime;
+				why = "This build has no VR support.";
+#endif
+				if (runtime.empty()) {
+					SPLog("VR unavailable: %s", why.c_str());
+					AddReport(why, yellow);
+					incapableConfigs.insert(
+					  std::make_pair("vr_enable", [why](std::string value) -> std::string {
+						  return value == "1" ? why : std::string();
+					  }));
+				} else {
+					SPLog("VR runtime: %s", runtime.c_str());
+					AddReport("Runtime: " + runtime, MakeVector4(0.5F, 1, 0.5F, 1));
+				}
+				AddReport();
+			}
 		}
 
 		void StartupScreenHelper::FixConfigs() { ExamineSystem(); }

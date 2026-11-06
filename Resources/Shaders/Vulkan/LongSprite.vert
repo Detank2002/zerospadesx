@@ -1,6 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the sprite's set (SPRITE_SET)
+#define ZS_VIEWS_BINDING 3
+#include "Multiview.glsl"
+
 // The view, from the sprites' own set (`SpriteView.glsl`), whose image this is too
 #include "SpriteView.glsl"
 
@@ -20,4 +24,5 @@ void main() {
 	texCoord = texCoordAttribute;
 
 	fogDensity = vec4(SpriteFogDensity(pos));
+	gl_Position = ZS_CORRECT(gl_Position);
 }

@@ -19,6 +19,7 @@
  */
 
 #include "ClientMenu.h"
+#include "ModsWindow.h"
 #include <Client/ClientUI.h>
 #include <Client/ClientUIHelper.h>
 #include <Client/Fonts.h>
@@ -74,7 +75,10 @@ namespace spades {
 			float sw = manager->screenWidth;
 			float sh = manager->screenHeight;
 
-			float winW = 180.0F, winH = 32.0F * 4.0F - 2.0F;
+			// In a headset, Controls and Reset Height under Mods.
+			forVR = helper->IsVRActive();
+			const int rows = forVR ? 7 : 5;
+			float winW = 180.0F, winH = 32.0F * rows - 2.0F;
 			float winX = (sw - winW) * 0.5F;
 			float winY = (sh - winH) * 0.5F;
 
@@ -116,9 +120,33 @@ namespace spades {
 			}
 			{
 				Handle<Button> button = Handle<Button>::New(manager);
+				button->caption = _Tr("Client", "Mods");
+				button->SetBounds(AABB2(winX, winY + 96.0F, winW, 30.0F));
+				button->activated = [this](UIElement& s) { OnMods(s); };
+				AddChild(button.GetPointerOrNull());
+			}
+			float rowY = winY + 128.0F;
+			if (forVR) {
+				Handle<Button> button = Handle<Button>::New(manager);
+				button->caption = _Tr("Client", "Controls");
+				button->SetBounds(AABB2(winX, rowY, winW, 30.0F));
+				button->activated = [this](UIElement& s) { OnControls(s); };
+				AddChild(button.GetPointerOrNull());
+				rowY += 32.0F;
+			}
+			if (forVR) {
+				Handle<Button> button = Handle<Button>::New(manager);
+				button->caption = _Tr("Client", "Reset Height");
+				button->SetBounds(AABB2(winX, rowY, winW, 30.0F));
+				button->activated = [this](UIElement& s) { OnResetHeight(s); };
+				AddChild(button.GetPointerOrNull());
+				rowY += 32.0F;
+			}
+			{
+				Handle<Button> button = Handle<Button>::New(manager);
 				button->caption = helper->IsDemoMode() ? _Tr("Client", "Exit Demo")
 				                                       : _Tr("Client", "Disconnect");
-				button->SetBounds(AABB2(winX, winY + 96.0F, winW, 30.0F));
+				button->SetBounds(AABB2(winX, rowY, winW, 30.0F));
 				button->activated = [this](UIElement& s) { OnDisconnect(s); };
 				AddChild(button.GetPointerOrNull());
 			}
@@ -153,9 +181,33 @@ namespace spades {
 			al->Run();
 		}
 
+		void ClientMenu::OnMods(UIElement&) {
+			if (escHint)
+				escHint->visible = false; // hide while the page is up
+
+			Handle<ModsWindow> window = Handle<ModsWindow>::New(this, ui);
+			window->closed = [this](UIElement&) {
+				if (escHint)
+					escHint->visible = true;
+			};
+			window->Run();
+		}
+
 		void ClientMenu::OnChatLog(UIElement&) { ui->EnterChatLogWindow(); }
 
 		void ClientMenu::OnDisconnect(UIElement&) { ui->shouldExit = true; }
+
+		void ClientMenu::OnControls(UIElement&) { ui->EnterVRControlsWindow(); }
+
+		void ClientMenu::OnResetHeight(UIElement&) {
+			// Standing height from the head as it is now: after the headset was
+			// off (on a table, say), an automatic recentre can leave the floor
+			// too low, and the player crouching however straight they stand.
+			// Only a deliberate one may lower it (Client::RecenterVR).
+			helper->ResetVRHeight();
+			helper->AlertNotice(_Tr("Client", "Height reset: you stand as tall as you are now"));
+			ui->SetActiveUI(nullptr);
+		}
 
 		void ClientMenu::HotKey(const std::string& key) {
 			if (IsEnabled() && key == "Escape") {

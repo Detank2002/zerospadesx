@@ -21,6 +21,7 @@
 #include <algorithm> //std::sort
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <regex>
 #include <set>
@@ -46,21 +47,21 @@
 #include <Core/CpuID.h>
 #include <Core/Debug.h>
 #include <Core/DirectoryFileSystem.h>
-#include <Core/DynamicMemoryStream.h>
 #include <Core/FileManager.h>
 #include <Core/ServerAddress.h>
+#include <Core/SamplingProfiler.h>
 #include <Core/Settings.h>
 #include <Core/StdStream.h>
 #include <Core/Strings.h>
 #include <Core/Thread.h>
 #include <Core/ZipFileSystem.h>
 #include <Gui/ConsoleScreen.h>
-#include <Gui/ModsScreenHelper.h>
+#include <Gui/ModOverlay.h>
 #include <Gui/StartupScreen.h>
+#include <Gui/UI/Settings/QualityPresets.h>
 #include <ZeroSpades.h>
 
 #include <Core/VoxelModel.h>
-#include <Draw/OpenGL/GLOptimizedVoxelModel.h>
 
 #include <ScriptBindings/ScriptManager.h>
 
@@ -79,6 +80,13 @@ DEFINE_SPADES_SETTING(cl_showStartupWindow, "1");
 // so external tooling (e.g. the mod workbench) can locate the binary without
 // guessing the platform's bundle layout.
 DEFINE_SPADES_SETTING(core_executablePath, "");
+// "auto" until a standalone headset's first start has written the headset
+// Performance level into the config (Main.cpp), "applied" after.
+DEFINE_SPADES_SETTING(vr_profile, "auto");
+// A file: the whole run sampled into it, a report written there at exit
+// (Core/SamplingProfiler.h). 64-bit Windows only.
+DEFINE_SPADES_SETTING(core_profile, "");
+
 
 #ifdef WIN32
 // windows.h must be included before DbgHelp.h and shlobj.h.
@@ -244,6 +252,8 @@ namespace {
 		printf("  --demo FILE          demo to use (default: latest in Demos/); a bare\n");
 		printf("                       name resolves under Demos/\n");
 		printf("  --player ID|NAME     player to follow (default: first player)\n");
+		printf("  --vr                 play in a VR headset through OpenXR (Vulkan\n");
+		printf("                       renderer); see VR.md\n");
 		printf("  -h, --help           show this help message\n");
 		printf("  -v, --version        show version information\n");
 		printf("\nAuto-recording can be enabled with the cg_demoAutoRecord setting.\n");
@@ -318,6 +328,13 @@ namespace {
 			}
 			if (!strcasecmp(a, "--replay-demo")) {
 				g_replayDemoMenuless = true;
+				return ++i;
+			}
+			if (!strcasecmp(a, "--vr")) {
+				// VR renders through the Vulkan renderer only, so it is forced too.
+				// Both go through the override list, so the saved config is untouched.
+				g_cvarOverrides.emplace_back("vr_enable", "1");
+				g_cvarOverrides.emplace_back("r_renderer", "vulkan");
 				return ++i;
 			}
 			if (!strcasecmp(a, "--demo")) {
@@ -601,6 +618,22 @@ int main(int argc, char** argv) {
 			i++;
 		}
 	}
+#if defined(__ANDROID__)
+	// A standalone headset is always one: VR on, through Vulkan, no window to
+	// mirror into and no startup window to click through. Overrides, so a
+	// config carried over from a PC is not rewritten.
+	g_cvarOverrides.emplace_back("vr_enable", "1");
+	g_cvarOverrides.emplace_back("r_renderer", "vulkan");
+	g_cvarOverrides.emplace_back("vr_mirror", "0");
+	g_cvarOverrides.emplace_back("cl_showStartupWindow", "0");
+	// SDL stops the main loop while the activity is paused (the headset's
+	// menu, the home screen), and OpenXR needs that loop: the runtime moves
+	// the session to STOPPING and waits for xrEndSession, and a session never
+	// ended gets the app killed, which is what leaving the game on the Quest
+	// did. The loop runs on; OpenXR's own session states say when to draw.
+	SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+	SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO, "0");
+#endif
 
 	if (g_printVersion) {
 		printf("%s\n", PACKAGE_STRING);
@@ -703,6 +736,105 @@ int main(int argc, char** argv) {
 
 		spades::FileManager::AddFileSystem(
 		  new spades::DirectoryFileSystem(spades::g_userResourceDirectory, true));
+#elif defined(__ANDROID__)
+		// A standalone headset. The game's paks travel in the APK as assets,
+		// which only SDL reads (SDL_RWFromFile on a relative path), so they are
+		// copied into the app's own storage, where the rest of the game reads
+		// them as files like anywhere else. Resources/index.txt, written by the
+		// APK build, lists them with a fingerprint each; when it differs from the
+		// copy kept beside the paks, every pak is copied again.
+		//
+		// Not into files/Resources. SDL opens a relative path in the app's own
+		// storage first and falls back to the APK only when nothing is there, so
+		// paks copied to files/Resources were what "Resources/x.pak" opened from
+		// then on: every new APK's paks went unread, and a fix to a shader never
+		// reached the headset. Those copies are removed.
+		{
+			const char* base = SDL_AndroidGetInternalStoragePath();
+			const std::string root = base ? base : ".";
+			const std::string paks = root + "/Paks";
+			mkdir(paks.c_str(), 0755);
+			auto readAll = [](SDL_RWops* io) {
+				std::string text;
+				if (!io)
+					return text;
+				char buf[4096];
+				size_t n;
+				while ((n = SDL_RWread(io, buf, 1, sizeof(buf))) > 0)
+					text.append(buf, n);
+				SDL_RWclose(io);
+				return text;
+			};
+			// The names, from each line's first word.
+			auto names = [](const std::string& index) {
+				std::vector<std::string> out;
+				size_t at = 0;
+				while (at < index.size()) {
+					size_t end = index.find('\n', at);
+					if (end == std::string::npos)
+						end = index.size();
+					std::string line = index.substr(at, end - at);
+					at = end + 1;
+					const size_t sp = line.find_first_of(" \t\r");
+					if (sp != std::string::npos)
+						line.resize(sp);
+					if (!line.empty())
+						out.push_back(line);
+				}
+				return out;
+			};
+			// The old copies first, or SDL would go on opening them.
+			const std::string legacy = root + "/Resources";
+			const std::string apkIndex = readAll(SDL_RWFromFile("Resources/index.txt", "rb"));
+			for (const auto& name : names(apkIndex))
+				remove((legacy + "/" + name).c_str());
+			remove((legacy + "/index.txt").c_str());
+			rmdir(legacy.c_str());
+			if (apkIndex.empty())
+				SPLog("[Android] No Resources/index.txt in the APK's assets");
+
+			const std::string keptIndex = readAll(SDL_RWFromFile((paks + "/index.txt").c_str(), "rb"));
+			int copied = 0;
+			if (keptIndex != apkIndex) {
+				for (const auto& name : names(apkIndex)) {
+					SDL_RWops* in = SDL_RWFromFile(("Resources/" + name).c_str(), "rb");
+					if (!in) {
+						SPLog("[Android] Asset Resources/%s is missing", name.c_str());
+						continue;
+					}
+					if (SDL_RWops* out = SDL_RWFromFile((paks + "/" + name).c_str(), "wb")) {
+						char buf[1 << 16];
+						size_t n;
+						while ((n = SDL_RWread(in, buf, 1, sizeof(buf))) > 0)
+							SDL_RWwrite(out, buf, 1, n);
+						SDL_RWclose(out);
+						copied++;
+					}
+					SDL_RWclose(in);
+				}
+				if (SDL_RWops* out = SDL_RWFromFile((paks + "/index.txt").c_str(), "wb")) {
+					SDL_RWwrite(out, apkIndex.data(), 1, apkIndex.size());
+					SDL_RWclose(out);
+				}
+			}
+			SPLog("[Android] Paks in %s: %s", paks.c_str(),
+			      copied ? (std::to_string(copied) + " copied from the APK").c_str()
+			             : "up to date with the APK");
+			spades::FileManager::AddFileSystem(new spades::DirectoryFileSystem(paks, false));
+			// Settings, logs and maps in the app's external storage
+			// (Android/data/com.zerospades.vr/files): there they can be read with
+			// adb pull or SideQuest's file browser from any build, where the app's
+			// own storage is closed to everything but a debuggable one. A headset
+			// that fails at start shows only an endless loading screen, so the log
+			// is the only account of it. The app's own storage if there is none.
+			std::string user = root;
+			if (const char* ext = SDL_AndroidGetExternalStoragePath())
+				user = ext;
+			spades::g_userResourceDirectory = user + "/UserResources";
+			mkdir(spades::g_userResourceDirectory.c_str(), 0755);
+			spades::FileManager::AddFileSystem(
+			  new spades::DirectoryFileSystem(spades::g_userResourceDirectory, true));
+		}
 #else
 		std::string home = getenv("HOME");
 
@@ -784,6 +916,22 @@ int main(int argc, char** argv) {
 		// Only override variables that already exist (every real cvar is
 		// registered by static initializers before main runs); unknown names are
 		// skipped with a warning so the on-disk config is guaranteed untouched.
+		// A standalone headset's first start takes the headset Performance level
+		// (QualityPresets.cpp), written into the config once; after that the VR
+		// tab's Headset Quality and every single setting are the player's.
+#if defined(__ANDROID__)
+		{
+			spades::Settings::ItemHandle profile("vr_profile", nullptr);
+			if (static_cast<std::string>(profile) == "auto") {
+				spades::gui::ApplyQualityPreset(spades::gui::GetHeadsetQualityPresets().front());
+				profile = "applied";
+				// Now: a headset app is often closed without a clean exit
+				spades::Settings::GetInstance()->Flush();
+				SPLog("[VR] First start: the headset Performance level");
+			}
+		}
+#endif
+
 		if (!g_cvarOverrides.empty()) {
 			auto knownNames = spades::Settings::GetInstance()->GetAllItemNames();
 			std::set<std::string> known(knownNames.begin(), knownNames.end());
@@ -800,6 +948,9 @@ int main(int argc, char** argv) {
 				      ov.first.c_str(), ov.second.c_str());
 			}
 		}
+
+		if (!static_cast<std::string>(core_profile).empty())
+			spades::SamplingProfiler::Start(core_profile);
 
 		// record the absolute executable path (overwrites any stale value from
 		// a previous launch, then gets flushed back to the config at shutdown).
@@ -917,43 +1068,9 @@ int main(int argc, char** argv) {
 				spades::FileManager::PrependFileSystem(fssImportant[i]);
 		}
 
-		// Mount enabled mods as an overlay on top of the base paks. Each enabled
-		// mod's pak(s) live in Mods/ and are prepended so they take priority over
-		// the base paks; the set is mounted in enabled order so the last-enabled
-		// mod ends up on top and wins conflicts. The shipped install paks are
-		// never modified — changes to the enabled set take effect on next launch.
-		//
-		// During a --try-mod run the enabled set is skipped entirely so the mod
-		// under test applies in isolation, on top of the base config only.
-		if (!spades::g_tryMod) {
-			std::vector<std::string> modPaks =
-			  spades::gui::ModsScreenHelper::GetEnabledModPakPaths();
-			for (const std::string& path : modPaks) {
-				try {
-					// Read the whole pak into memory and mount from there, so the
-					// file on disk is never held open for the session. That lets
-					// the mod manager overwrite or delete an enabled pak (for
-					// example re-downloading it) while the game is running — a
-					// mounted stream reading straight from the file would lock it.
-					std::string bytes;
-					{
-						auto file = spades::FileManager::OpenForReading(path.c_str());
-						bytes = file->ReadAllBytes();
-					} // file handle closed here
-					std::unique_ptr<spades::DynamicMemoryStream> mem(
-					  new spades::DynamicMemoryStream());
-					if (!bytes.empty())
-						mem->Write(bytes.data(), bytes.size());
-					mem->SetPosition(0);
-					auto* zfs = new spades::ZipFileSystem(mem.get());
-					mem.release(); // ownership transferred to the ZipFileSystem
-					spades::FileManager::PrependFileSystem(zfs);
-					SPLog("Mod pak mounted (in memory): %s", path.c_str());
-				} catch (const std::exception& ex) {
-					SPLog("Mod pak failed to mount: %s: %s", path.c_str(), ex.what());
-				}
-			}
-		}
+		// Mount enabled mods as an overlay on top of the base paks (see ModOverlay).
+		// The shipped install paks are never modified.
+		spades::gui::ModOverlay::Mount();
 
 		// Mount the --try-mod target on top of everything. The target is an
 		// unpacked mod folder or a single .pak/.zip — both expose the same file
@@ -1038,6 +1155,8 @@ int main(int argc, char** argv) {
 			spades::StartClient(host);
 		}
 
+		spades::SamplingProfiler::Stop();
+
 		// Revert any --override-cvar values to what they were before this run so
 		// the flush below writes the unchanged configuration back to disk.
 		for (const auto& orig : g_cvarOverrideOriginals) {
@@ -1064,12 +1183,28 @@ int main(int argc, char** argv) {
 
 		SPLog("[!] Terminating due to the fatal error: %s", ex.what());
 
+#if defined(__ANDROID__)
+		// A standalone headset never shows a flat dialog: the game would sit behind
+		// its loading screen forever (a Quest 2 did). Logged (to logcat too),
+		// then out, back to the headset's home.
+		exit(1);
+#else
 		SDL_InitSubSystem(SDL_INIT_VIDEO);
 		if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
 			_Tr("Main", "ZeroSpades Fatal Error").c_str(), msg.c_str(), nullptr)) {
 			fprintf(stderr, "[Fatal] %s\n", ex.what());
 		}
+#endif
 	}
+
+#if defined(__ANDROID__)
+	// Android keeps the process after main() returns, and the next launch runs
+	// main() again in it, with every static of this run still set: the second
+	// launch crashed in StartLog, the third (a fresh process) worked. End the
+	// process instead, so every launch starts clean.
+	spades::StopLog();
+	_exit(0);
+#endif
 
 	return 0;
 }

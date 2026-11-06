@@ -47,9 +47,11 @@ namespace spades {
 				uint32_t width;
 				uint32_t height;
 				VkFormat format;
+				uint32_t layers; // 2: both eyes (multiview)
 
 				bool operator==(const ImageSpec& other) const {
-					return width == other.width && height == other.height && format == other.format;
+					return width == other.width && height == other.height && format == other.format &&
+					       layers == other.layers;
 				}
 			};
 
@@ -57,7 +59,8 @@ namespace spades {
 				size_t operator()(const ImageSpec& spec) const {
 					return std::hash<uint32_t>()(spec.width) ^
 					       (std::hash<uint32_t>()(spec.height) << 1) ^
-					       (std::hash<uint32_t>()(static_cast<uint32_t>(spec.format)) << 2);
+					       (std::hash<uint32_t>()(static_cast<uint32_t>(spec.format)) << 2) ^
+					       (std::hash<uint32_t>()(spec.layers) << 3);
 				}
 			};
 
@@ -94,7 +97,8 @@ namespace spades {
 			 * The image is marked as in-use until Release() is called.
 			 * Creates a new image if no matching one is available in the pool.
 			 */
-			Handle<VulkanImage> Acquire(uint32_t width, uint32_t height, VkFormat format);
+			Handle<VulkanImage> Acquire(uint32_t width, uint32_t height, VkFormat format,
+			                            uint32_t layers = 1);
 
 			/**
 			 * Return a previously acquired image back to the pool.

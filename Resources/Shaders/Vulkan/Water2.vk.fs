@@ -1,6 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 1 // in place of the empty set before the lights
+#include "Multiview.glsl"
+
 /*
  Copyright (c) 2013 Fran6nd
 
@@ -58,11 +61,11 @@ layout(location = 3) in vec3 v_worldPosition;
 layout(location = 4) in vec2 v_worldPositionOriginal;
 layout(location = 5) in float v_surfaceHeight;
 
-layout(binding = 0) uniform sampler2D screenTexture;
-layout(binding = 1) uniform sampler2D depthTexture;
+layout(binding = 0) uniform ZS_SCREEN_SAMPLER screenTexture;
+layout(binding = 1) uniform ZS_SCREEN_SAMPLER depthTexture;
 layout(binding = 2) uniform sampler2D mainTexture;
 layout(binding = 8) uniform sampler2DArray waveTextureArray;
-layout(binding = 6) uniform sampler2D mirrorTexture;
+layout(binding = 6) uniform ZS_SCREEN_SAMPLER mirrorTexture;
 
 // Push constants for frequently updated per-frame data (112 bytes, within 128 byte limit)
 layout(push_constant) uniform WaterPushConstants {
@@ -87,6 +90,15 @@ layout(location = 0) out vec4 fragColor;
 
 
 
+// Multiview: this eye's view of the water, where it differs from eye 0's
+#ifdef ZS_MULTIVIEW
+#define ZS_EYE_ORIGIN zsViews.eyeOrigin[gl_ViewIndex]
+#define ZS_FOVTAN zsViews.fovTan[gl_ViewIndex]
+#else
+#define ZS_EYE_ORIGIN waterPC.viewOriginVector
+#define ZS_FOVTAN waterPC.fovTan
+#endif
+
 // GGX distribution function for specular
 float GGXDistribution(float m, float dotHalf) {
 	float m2 = m * m;
@@ -107,12 +119,12 @@ float decodeDepth(float w, float near, float far) {
 }
 
 float depthAt(vec2 pt) {
-	float w = texture(depthTexture, pt).x;
+	float w = ZS_SCREEN_TEX(depthTexture, pt).x;
 	return decodeDepth(w, waterPC.zNearFar.x, waterPC.zNearFar.y);
 }
 
 void main() {
-	vec3 worldPositionFromOrigin = v_worldPosition - waterPC.viewOriginVector.xyz;
+	vec3 worldPositionFromOrigin = v_worldPosition - ZS_EYE_ORIGIN.xyz;
 	vec4 waveCoord = v_worldPositionOriginal.xyxy
 		* vec4(vec2(0.08), vec2(0.15704))
 		+ vec4(0., 0., 0.754, 0.1315);
@@ -156,7 +168,7 @@ void main() {
 	// plane), force envelope to 1.0 so the screenTexture sample can't bleed
 	// the cyan sky color through into the water. Tested at origScrPos so
 	// there's no wave modulation in the test result.
-	float rawDepth = texture(depthTexture, origScrPos).x;
+	float rawDepth = ZS_SCREEN_TEX(depthTexture, origScrPos).x;
 	if (rawDepth >= 0.9999) {
 		envelope = 1.0;
 	}
@@ -184,7 +196,7 @@ void main() {
 	waterColor *= sunlight + EvaluateAmbientLight(1.0) + dynamicLight;
 
 	// underwater object color
-	fragColor = texture(screenTexture, origScrPos);
+	fragColor = ZS_SCREEN_TEX(screenTexture, origScrPos);
 #if !LINEAR_FRAMEBUFFER
 	fragColor.xyz *= fragColor.xyz; // screen color to linear
 #endif
@@ -214,7 +226,7 @@ void main() {
 	disp.y = -abs(disp.y * 3.0);
 	scrPos2 -= disp * scale * waterPC.displaceScale * 15.0;
 
-	vec3 refl = textureLod(mirrorTexture, scrPos2, lodBias).xyz;
+	vec3 refl = ZS_SCREEN_TEXLOD(mirrorTexture, scrPos2, lodBias).xyz;
 #if !LINEAR_FRAMEBUFFER
 	refl *= refl; // linearize
 #endif

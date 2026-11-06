@@ -34,6 +34,7 @@
 #include <Core/Exception.h>
 #include <Core/FileManager.h>
 #include <Core/IAudioStream.h>
+#include <Core/ResourceChanges.h>
 #include <Core/Settings.h>
 
 DEFINE_SPADES_SETTING(s_volume, "100");
@@ -41,6 +42,16 @@ DEFINE_SPADES_SETTING(s_maxPolyphonics, "96");
 DEFINE_SPADES_SETTING(s_eax, "1");
 DEFINE_SPADES_SETTING(s_alPreciseErrorCheck, "1");
 DEFINE_SPADES_SETTING(s_openalDevice, "");
+// HRTF (ALC_SOFT_HRTF), read when the audio device opens: 1 on, 0 off, -1 on in a
+// headset (worn with headphones) and OpenAL Soft's own choice otherwise. For
+// everyone, not a VR setting: hearing better where a sound comes from must be
+// open to a monitor player in headphones too (VR.md, "Fair play").
+DEFINE_SPADES_SETTING(s_hrtf, "-1");
+SPADES_SETTING(vr_enable);
+
+#ifndef ALC_HRTF_SOFT
+#define ALC_HRTF_SOFT 0x1992
+#endif
 
 // lm: seems to be missing for me..
 #ifndef ALC_ALL_DEVICES_SPECIFIER
@@ -157,6 +168,12 @@ namespace spades {
 			}
 
 			ALuint GetFormat() { return format; }
+
+			/** Takes the sound of `other`, which gets this chunk's old buffer. */
+			void Replace(ALAudioChunk& other) {
+				std::swap(handle, other.handle);
+				std::swap(format, other.format);
+			}
 		};
 
 		class ALDevice::Internal {
@@ -538,12 +555,28 @@ namespace spades {
 						SPLog("	 %s", strs[i].c_str());
 				}
 
-				alContext = al::qalcCreateContext(alDevice, NULL);
+				// HRTF is asked for when the context is made, or left to OpenAL Soft.
+				const bool hasHrtf = al::qalcIsExtensionPresent(alDevice, "ALC_SOFT_HRTF");
+				const int hrtf = (int)s_hrtf;
+				const bool wantHrtf = hrtf > 0 || (hrtf < 0 && (bool)vr_enable);
+				ALCint attrs[3] = {0, 0, 0};
+				if (hasHrtf && (hrtf >= 0 || wantHrtf)) {
+					attrs[0] = ALC_HRTF_SOFT;
+					attrs[1] = wantHrtf ? ALC_TRUE : ALC_FALSE;
+				}
+				alContext = al::qalcCreateContext(alDevice, attrs[0] ? attrs : NULL);
 				if (UNLIKELY(!alContext)) {
 					al::qalcCloseDevice(alDevice);
 					SPRaise("Failed to create OpenAL context.");
 				}
 				al::qalcMakeContextCurrent(alContext);
+				if (hasHrtf) {
+					ALCint on = 0;
+					al::qalcGetIntegerv(alDevice, ALC_HRTF_SOFT, 1, &on);
+					SPLog("HRTF: %s (s_hrtf %d)", on ? "on" : "off", hrtf);
+				} else {
+					SPLog("HRTF: not available (no ALC_SOFT_HRTF)");
+				}
 
 				SPLog("OpenAL Info:");
 				SPLog("	 Vendor: %s", al::qalGetString(AL_VENDOR));
@@ -631,6 +664,19 @@ namespace spades {
 
 				for (size_t i = 0; i < srcs.size(); i++)
 					delete srcs[i];
+			}
+
+			// OpenAL can't delete a buffer a source still has attached.
+			void StopSourcesPlaying(ALuint buffer) {
+				SPADES_MARK_FUNCTION();
+
+				for (ALSrc* src : srcs) {
+					ALint attached;
+					al::qalGetSourcei(src->handle, AL_BUFFER, &attached);
+					ALCheckError();
+					if (static_cast<ALuint>(attached) == buffer)
+						src->Terminate();
+				}
 			}
 
 			ALSrc* AllocChunk() {
@@ -885,6 +931,25 @@ namespace spades {
 				chunk.second->Release();
 
 			chunks.clear();
+		}
+
+		void ALDevice::ReloadResources(const ResourceChanges& changes) {
+			SPADES_MARK_FUNCTION();
+
+			for (const auto& entry : chunks) {
+				// Gone with a disabled mod: keep what is loaded.
+				if (!changes.Contains(entry.first) ||
+				    !FileManager::FileExists(entry.first.c_str()))
+					continue;
+				try {
+					Handle<ALAudioChunk> fresh{CreateChunk(entry.first.c_str()), false};
+					d->StopSourcesPlaying(entry.second->GetHandle());
+					entry.second->Replace(*fresh);
+				} catch (const std::exception& ex) {
+					// Broken: keep what is loaded.
+					SPLog("Sound '%s' not reloaded: %s", entry.first.c_str(), ex.what());
+				}
+			}
 		}
 
 		void ALDevice::Play(client::IAudioChunk* chunk, const spades::Vector3& origin,

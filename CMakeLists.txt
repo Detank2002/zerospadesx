@@ -5,6 +5,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 
 project(ZeroSpades)
+enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,8 +37,17 @@ if(POLICY CMP0072)
 endif()
 
 # Rendering backend options
-option(USE_OPENGL "Enable OpenGL renderer" ON)
+# Android has no desktop OpenGL (and no GLEW): the game there is Vulkan only.
+if(ANDROID)
+	set(_ZS_DEFAULT_GL OFF)
+else()
+	set(_ZS_DEFAULT_GL ON)
+endif()
+option(USE_OPENGL "Enable OpenGL renderer" ${_ZS_DEFAULT_GL})
 option(USE_VULKAN "Enable Vulkan renderer" ON)
+# VR through OpenXR. It renders with the Vulkan renderer, so it needs USE_VULKAN;
+# the build falls back to a flat-screen client when the loader is not found.
+option(USE_OPENXR "Enable OpenXR VR support (needs USE_VULKAN)" ON)
 # macOS Debug builds only: link the Vulkan loader instead of MoltenVK so
 # validation layers can be injected. Produces a bundle that is not
 # self-contained, so it is rejected outside Debug builds.
@@ -51,14 +61,22 @@ if(USE_VCPKG)
 	find_package(freetype CONFIG REQUIRED)
 
 	if(NOT APPLE)
-		find_package(GLEW REQUIRED)
-		set(GLEW_LIBRARY GLEW::GLEW)
+		if(USE_OPENGL)
+			find_package(GLEW REQUIRED)
+			set(GLEW_LIBRARY GLEW::GLEW)
+		endif()
 
 		find_package(CURL REQUIRED)
 		set(CURL_LIBRARY CURL::libcurl)
 	endif()
 
-	set(SDL2_LIBRARY SDL2::SDL2main SDL2::SDL2-static)
+	if(ANDROID)
+		# SDL's Java activity loads libmain.so and calls SDL_main; there is no
+		# SDL2main to link.
+		set(SDL2_LIBRARY SDL2::SDL2-static)
+	else()
+		set(SDL2_LIBRARY SDL2::SDL2main SDL2::SDL2-static)
+	endif()
 	set(SDL2_IMAGE_LIBRARY SDL2_image::SDL2_image-static)
 	set(FREETYPE_LIBRARIES freetype)
 
@@ -135,6 +153,15 @@ if(USE_VULKAN)
 			find_package(molten-vk CONFIG REQUIRED)
 			set(MOLTENVK_LIBRARY MoltenVK::MoltenVK)
 			message(STATUS "Using MoltenVK (vcpkg): ${MOLTENVK_LIBRARY}")
+		elseif(ANDROID)
+			# The system's loader, from the NDK; vcpkg's vulkan-loader is not for
+			# Android, and the headset's driver is reached only through this one.
+			find_library(ANDROID_VULKAN_LIBRARY vulkan REQUIRED)
+			add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+			set_target_properties(Vulkan::Vulkan PROPERTIES
+				INTERFACE_LINK_LIBRARIES "${ANDROID_VULKAN_LIBRARY}"
+				INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIRS}")
+			message(STATUS "Vulkan loader (Android system): ${ANDROID_VULKAN_LIBRARY}")
 		else()
 			find_package(Vulkan REQUIRED)
 			message(STATUS "Vulkan loader (vcpkg): ${Vulkan_LIBRARIES}")
@@ -328,6 +355,21 @@ else()
 	message(STATUS "Vulkan renderer: DISABLED")
 endif()
 
+if(USE_OPENXR AND NOT USE_VULKAN)
+	message(STATUS "OpenXR VR: DISABLED (needs the Vulkan renderer)")
+	set(USE_OPENXR OFF)
+endif()
+if(USE_OPENXR)
+	find_package(OpenXR CONFIG QUIET)
+	if(OpenXR_FOUND)
+		add_definitions(-DUSE_OPENXR=1)
+		message(STATUS "OpenXR VR: ENABLED")
+	else()
+		message(STATUS "OpenXR VR: DISABLED (OpenXR loader not found)")
+		set(USE_OPENXR OFF)
+	endif()
+endif()
+
 # Ensure at least one renderer is enabled
 if(NOT USE_OPENGL AND NOT USE_VULKAN)
 	message(FATAL_ERROR "At least one renderer must be enabled (USE_OPENGL or USE_VULKAN)")
@@ -438,6 +480,7 @@ endif()
 
 add_subdirectory(Resources)
 add_subdirectory(Sources)
+add_subdirectory(Server/test)
 
 if(UNIX AND NOT APPLE)
 	# various texts

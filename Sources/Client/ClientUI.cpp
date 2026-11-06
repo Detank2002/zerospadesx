@@ -31,6 +31,7 @@
 #include <Gui/UI/Framework/UIManager.h>
 #include <Gui/UI/InGame/ChatLogWindow.h>
 #include <Gui/UI/InGame/ChatWindow.h>
+#include <Gui/UI/InGame/VRControlsWindow.h>
 #include <Gui/UI/InGame/ClientMenu.h>
 
 namespace spades {
@@ -171,7 +172,8 @@ namespace spades {
 		}
 
 		void ClientUI::EnterClientMenu() {
-			if (!clientMenu) {
+			// Made again once the headset comes or goes: its buttons differ.
+			if (!clientMenu || clientMenu->IsForVR() != helper->IsVRActive()) {
 				clientMenu = Handle<ClientMenu>::New(this);
 				clientMenu->SetBounds(manager->GetRootElement().GetBounds());
 			}
@@ -208,6 +210,12 @@ namespace spades {
 			// another screen may have replaced the peek view in the meantime
 			if (peeking)
 				SetActiveUI(nullptr);
+		}
+
+		void ClientUI::EnterVRControlsWindow() {
+			// Made each time: it opens on the slide for the controllers in use.
+			vrControlsWindow = Handle<VRControlsWindow>::New(this);
+			SetActiveUI(vrControlsWindow.GetPointerOrNull());
 		}
 
 		void ClientUI::EnterChatLogWindow() {

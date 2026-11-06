@@ -55,27 +55,33 @@ namespace spades {
 		    : device(renderer.GetDevice()->GetDevice()) {
 			SPADES_MARK_FUNCTION();
 
-			const VkDescriptorSetLayoutBinding bindings[2] = {
+			// Multiview: the eyes' views too (ZsViews), the frame slot's, so the
+			// scene's pipelines need no fifth set
+			const bool eyeViews = renderer.GetViewSetBuffer(0) != nullptr;
+			const VkDescriptorSetLayoutBinding bindings[3] = {
 			  {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
 			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 			  // The view's ambient occlusion
 			  {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
-			   nullptr}};
+			   nullptr},
+			  {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
 			VkDescriptorSetLayoutCreateInfo layoutInfo{};
 			layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-			layoutInfo.bindingCount = 2;
+			layoutInfo.bindingCount = eyeViews ? 3 : 2;
 			layoutInfo.pBindings = bindings;
 			if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &setLayout) != VK_SUCCESS)
 				SPRaise("Failed to create the scene view descriptor set layout");
 
 			const std::uint32_t setCount = static_cast<std::uint32_t>(framesInFlight) * ViewCount;
-			const VkDescriptorPoolSize poolSizes[2] = {
+			const VkDescriptorPoolSize poolSizes[3] = {
 			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, setCount},
-			  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount}};
+			  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount},
+			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, setCount}};
 			VkDescriptorPoolCreateInfo poolInfo{};
 			poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 			poolInfo.maxSets = setCount;
-			poolInfo.poolSizeCount = 2;
+			poolInfo.poolSizeCount = eyeViews ? 3 : 2;
 			poolInfo.pPoolSizes = poolSizes;
 			if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS)
 				SPRaise("Failed to create the scene view descriptor pool");
@@ -88,7 +94,8 @@ namespace spades {
 			stride = (sizeof(GpuView) + alignment - 1) / alignment * alignment;
 
 			slots.resize(framesInFlight);
-			for (Slot& slot : slots) {
+			for (std::size_t slotIndex = 0; slotIndex < slots.size(); slotIndex++) {
+				Slot& slot = slots[slotIndex];
 				slot.buffer = Handle<VulkanBuffer>::New(
 				  renderer.GetDevice(), stride * ViewCount, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 				  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -115,6 +122,19 @@ namespace spades {
 					write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 					write.pBufferInfo = &bufferInfo;
 					vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+				}
+				if (VulkanBuffer* views = renderer.GetViewSetBuffer(slotIndex)) {
+					const VkDescriptorBufferInfo viewsInfo{views->GetBuffer(), 0, VK_WHOLE_SIZE};
+					for (VkDescriptorSet set : slot.sets) {
+						VkWriteDescriptorSet write{};
+						write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+						write.dstSet = set;
+						write.dstBinding = 2;
+						write.descriptorCount = 1;
+						write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+						write.pBufferInfo = &viewsInfo;
+						vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+					}
 				}
 			}
 		}

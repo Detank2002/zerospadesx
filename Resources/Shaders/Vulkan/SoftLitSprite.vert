@@ -21,6 +21,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#define ZS_VIEWS_SET 3 // the sprite's set (SPRITE_SET)
+#define ZS_VIEWS_BINDING 3
+#include "Multiview.glsl"
+
 // A soft sprite lit as the volume it stands for (`r_softParticles` 2), as GL's
 // SoftLitSprite.vs: its quad is brought to the front of the volume like a soft
 // sprite's, and each corner gets the normal of the volume's bulge there. The
@@ -119,7 +123,10 @@ void main() {
 	texCoord.xy = corner * 0.5 + 0.5;
 
 	// Depth texture coord: the scene's images run from the top down.
-	vec2 ndc = gl_Position.xy / gl_Position.w;
+	// In this eye's picture: in multiview, eye 0's put the right eye's soft
+	// edge where the left eye saw the scene
+	vec4 eyeClip = ZS_CORRECT(gl_Position);
+	vec2 ndc = eyeClip.xy / eyeClip.w;
 	texCoord.zw = vec2(0.5 + ndc.x * 0.5, 0.5 - ndc.y * 0.5);
 
 	fogDensity = vec4(SpriteFogDensity(pos));
@@ -132,4 +139,5 @@ void main() {
 
 	depthRange.y /= nearFar;
 	depthRange.z *= nearFar;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

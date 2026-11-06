@@ -58,12 +58,19 @@ namespace spades {
 				          "working:\n\n{0}\n\nSee SystemMessages.log for more details.",
 				          msg);
 
+#if defined(__ANDROID__)
+				// A standalone headset never shows a flat dialog: the game would sit behind
+				// its loading screen forever (a Quest 2 did). Logged (to logcat too),
+				// then out, back to the headset's home.
+				exit(1);
+#else
 				SDL_InitSubSystem(SDL_INIT_VIDEO);
 				if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
 				                             _Tr("Main", "ZeroSpades Fatal Error").c_str(),
 				                             msg.c_str(), nullptr)) {
 					fprintf(stderr, "[Fatal] %s\n", err.c_str());
 				}
+#endif
 			}
 		}
 		void Runner::Run() {

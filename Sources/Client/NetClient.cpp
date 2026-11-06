@@ -40,6 +40,8 @@
 #include "TCGameMode.h"
 #include "PieMenu.h"
 #include "Teamplay.h"
+#include "PlayerOutfit.h"
+#include "PieMenuView.h"
 #include "Weapon.h"
 #include "World.h"
 #include <Core/CP437.h>
@@ -458,6 +460,7 @@ namespace spades {
 
 						if (type != PacketTypeMapStart)
 							SPRaise("Unexpected packet: %d", type);
+						client->GetPlayerOutfits().MapStarted();
 
 						auto mapSize = reader.ReadInt();
 						SPLog("Map size advertised by the server: %lu", (unsigned long)mapSize);
@@ -589,10 +592,14 @@ namespace spades {
 		void NetClient::CaptureKickReason(spades::client::NetPacketReader& r) {
 			std::string msg = StripNewlines(TrimSpaces(r.ReadRemainingString()));
 			customKickReasonString = msg.substr(0, kKickReasonMaxBytes);
+			customKickReasonTime = std::chrono::steady_clock::now();
 		}
 
 		std::string NetClient::DisconnectReasonString(uint32_t num) {
-			if (!customKickReasonString.empty())
+			// A kick's reason comes just before the kick. Server chat from long
+			// before (a wave's countdown) is not why the connection ended.
+			if (!customKickReasonString.empty() &&
+			    std::chrono::steady_clock::now() - customKickReasonTime < std::chrono::seconds(3))
 				return customKickReasonString;
 
 			switch (num) {
@@ -615,6 +622,7 @@ namespace spades {
 				case ExtensionTypePieMenu: return "Pie Menu";
 				case ExtensionTypeFlashlight: return "Flashlight";
 				case ExtensionTypeDaytimeWeather: return "Daytime and Weather";
+				case ExtensionTypePlayerOutfit: return "Player Outfit";
 				case ExtensionTypePlayerLimit: return "Player Limit";
 				case ExtensionTypeMessageTypes: return "Message Types";
 				case ExtensionTypeKickReason: return "Kick Reason";
@@ -693,6 +701,10 @@ namespace spades {
 						return false;
 					HandlePieMenuPacket(r);
 					return true;
+				case PacketTypeVRPresence:
+					// A pose is about a player in the current world; before the world
+					// exists there is nobody to put it on, and the next one is 50ms away.
+					return status != NetClientStatusConnected;
 				case PacketTypeFlashlight:
 					// The Connecting stage rejects anything but MapStart, so a Flashlight
 					// packet is applied here; later, it waits for the world like the rest.
@@ -703,6 +715,13 @@ namespace spades {
 				case PacketTypeDaytimeWeather:
 					// A Sky needs no world and applies on arrival, whatever the stage.
 					HandleDaytimeWeatherPacket(r);
+					return true;
+				case PacketTypePlayerOutfit:
+					// Outfits belong to player ids, not to a world: applied on arrival,
+					// whatever the stage. Team Outfits comes as soon as the extension is
+					// agreed, which can be before the map; a Set Outfit before the
+					// Existing Player it goes with.
+					HandlePlayerOutfitPacket(r);
 					return true;
 				case PacketTypeVersionGet: {
 					if (r.GetNumRemainingBytes() > 0) {
@@ -725,7 +744,11 @@ namespace spades {
 					// after StateData, and StateData never arrives when the server kicks
 					// before sending the map). Peek so non-kick chat falls through with
 					// an untouched reader cursor.
-					if (r.GetNumRemainingBytes() >= 2 &&
+					// Only before we're Connected: this runs for every packet, and once
+					// in the game the same id and type are the server's own chat (a
+					// server's announcements and command replies), which was all
+					// swallowed here. The Connected handler keeps it as the kick reason.
+					if (status != NetClientStatusConnected && r.GetNumRemainingBytes() >= 2 &&
 						r.Peek(0) == kServerPlayerId && r.Peek(1) == ChatTypeSystem) {
 						r.ReadByte(); // playerId
 						r.ReadByte(); // chat type
@@ -770,6 +793,56 @@ namespace spades {
 			}
 
 			SendSupportedExtensions();
+		}
+
+		void NetClient::HandleVRPresencePacket(spades::client::NetPacketReader& r) {
+			SPADES_MARK_FUNCTION();
+
+			// Same rule as Teamplay: only what the handshake agreed to.
+			if (!HasExtension(ExtensionTypeVRPresence) || r.GetNumRemainingBytes() < 1)
+				return;
+
+			switch (r.ReadByte()) {
+				case VRSubPose: {
+					// A short pose is dropped, never read past: the next arrives in 50ms,
+					// while reading past the end would take the connection down.
+					if (r.GetNumRemainingBytes() < 1 + kVRPosePayloadBytes)
+						return;
+					int playerId = r.ReadByte();
+					char payload[kVRPosePayloadBytes];
+					for (std::size_t i = 0; i < kVRPosePayloadBytes; i++)
+						payload[i] = static_cast<char>(r.ReadByte());
+					if (!GetPlayerOrNull(playerId))
+						return;
+					client->VRPoseReceived(playerId, vrnet::DecodePose(payload));
+					break;
+				}
+				case VRSubConfig: {
+					if (r.GetNumRemainingBytes() < 2)
+						return;
+					std::uint8_t flags = r.ReadByte();
+					std::uint8_t rate = r.ReadByte();
+					client->VRPresenceConfigured(flags, rate);
+					break;
+				}
+				default:
+					// A sub packet from a newer version of the extension.
+					break;
+			}
+		}
+
+		void NetClient::SendVRPose(const VRNetPose& pose) {
+			SPADES_MARK_FUNCTION();
+			if (!IsVRPresenceAvailable() || !peer)
+				return;
+			std::vector<char> data;
+			data.reserve(2 + kVRPosePayloadBytes);
+			data.push_back(static_cast<char>(PacketTypeVRPresence));
+			data.push_back(static_cast<char>(VRSubPose));
+			vrnet::EncodePose(data, pose);
+			enet_peer_send(peer, 0,
+			               enet_packet_create(data.data(), data.size(),
+			                                  ENET_PACKET_FLAG_UNSEQUENCED));
 		}
 
 		void NetClient::HandleTeamplayPacket(spades::client::NetPacketReader& r) {
@@ -941,6 +1014,17 @@ namespace spades {
 			ApplyFlashlightPacket(r, *client, flashlightBeams, false);
 		}
 
+		void NetClient::HandlePlayerOutfitPacket(spades::client::NetPacketReader& r) {
+			SPADES_MARK_FUNCTION();
+
+			if (!HasExtension(ExtensionTypePlayerOutfit)) {
+				SPLog("Ignoring a Player Outfit packet from a server that did not "
+				      "negotiate the extension");
+				return;
+			}
+			ApplyPlayerOutfitPacket(r, client->GetPlayerOutfits());
+		}
+
 		void NetClient::HandleDaytimeWeatherPacket(spades::client::NetPacketReader& r) {
 			SPADES_MARK_FUNCTION();
 
@@ -963,6 +1047,7 @@ namespace spades {
 				case PacketTypeTeamplay: HandleTeamplayPacket(r); break;
 				case PacketTypePieMenu: HandlePieMenuPacket(r); break;
 				case PacketTypeDamageMarker: HandleDamageMarkerPacket(r); break;
+				case PacketTypeVRPresence: HandleVRPresencePacket(r); break;
 				case PacketTypeFlashlight: HandleFlashlightPacket(r); break;
 				case PacketTypePositionData: {
 					Player& p = GetLocalPlayer();
@@ -1203,6 +1288,9 @@ namespace spades {
 						blockColor.x = Clamp((int)cg_defaultBlockColorR, 0, 255);
 						blockColor.y = Clamp((int)cg_defaultBlockColorG, 0, 255);
 						blockColor.z = Clamp((int)cg_defaultBlockColorB, 0, 255);
+						// The colour held at death, back after the respawn.
+						if (auto kept = client->GetKeptBlockColor())
+							blockColor = *kept;
 						pRef.SetHeldBlockColor(blockColor);
 						SendHeldBlockColor(); // ensure block color is synchronized
 					}
@@ -1394,8 +1482,12 @@ namespace spades {
 					std::string msg = StripNewlines(TrimSpaces(r.ReadRemainingString()));
 
 					if (type == ChatTypeSystem) {
-						// playerId 255 is the kick-reason channel, already consumed by
-						// HandleHandshakePackets before we get here.
+						// From playerId 255 it may be the reason for a kick that
+						// follows: kept for the disconnect screen, and shown as well.
+						if (playerId == kServerPlayerId) {
+							customKickReasonString = msg.substr(0, kKickReasonMaxBytes);
+							customKickReasonTime = std::chrono::steady_clock::now();
+						}
 						client->ServerSentMessage(false, msg);
 
 						// Speculate the best game properties based on the server generated messages
@@ -1423,6 +1515,7 @@ namespace spades {
 						SendMapCached();
 
 					client->SetWorld(NULL);
+					client->GetPlayerOutfits().MapStarted();
 
 					auto mapSize = r.ReadInt();
 					SPLog("Map size advertised by the server: %lu", (unsigned long)mapSize);
@@ -1969,6 +2062,9 @@ namespace spades {
 
 			osInfo.append(" | " ZEROSPADES_VER_STR);
 			osInfo.append(" (" + archInfo + ")");
+			// In a headset, which kind: "PCVR" or "QuestVR".
+			if (*VRClientTag())
+				osInfo.append(std::string(" ") + VRClientTag());
 
 			NetPacketWriter w(PacketTypeVersionSend);
 			w.WriteByte((uint8_t)'o');
@@ -2355,6 +2451,7 @@ namespace spades {
 
 			WriteInitialTeamplayDemoState();
 			WriteInitialFlashlightDemoState();
+			WriteInitialPlayerOutfitDemoState();
 			WriteInitialDaytimeWeatherDemoState();
 
 			SPLog("Initial demo state written successfully");
@@ -2416,6 +2513,36 @@ namespace spades {
 
 				const auto& data = w.GetData();
 				demoRecorder->RecordPacket(data.data(), data.size());
+			}
+		}
+
+		void NetClient::WriteInitialPlayerOutfitDemoState() {
+			SPADES_MARK_FUNCTION();
+
+			if (!HasExtension(ExtensionTypePlayerOutfit))
+				return;
+
+			// The outfits in force, as the server sends them to a player joining now.
+			const PlayerOutfits& outfits = client->GetPlayerOutfits();
+			auto record = [this](NetPacketWriter& w) {
+				const auto& data = w.GetData();
+				demoRecorder->RecordPacket(data.data(), data.size());
+			};
+			{
+				NetPacketWriter w(PacketTypePlayerOutfit);
+				w.WriteByte(PlayerOutfits::kSubTeamOutfits);
+				for (const auto& entry : outfits.GetTeamOutfits()) {
+					w.WriteByte(static_cast<std::uint8_t>(entry.first));
+					w.WriteByte(static_cast<std::uint8_t>(entry.second));
+				}
+				record(w);
+			}
+			for (const auto& entry : outfits.GetPlayerOutfits()) {
+				NetPacketWriter w(PacketTypePlayerOutfit);
+				w.WriteByte(PlayerOutfits::kSubSetOutfit);
+				w.WriteByte(static_cast<std::uint8_t>(entry.first));
+				w.WriteByte(static_cast<std::uint8_t>(entry.second));
+				record(w);
 			}
 		}
 

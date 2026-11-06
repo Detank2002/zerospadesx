@@ -154,6 +154,30 @@ namespace spades {
 
 				Vector3 velBias = {0, 0, -1.0F};
 
+				// Debris for the outer voxels: four pieces and a puff of smoke each,
+				// up to a budget for the whole chunk, the voxels taken evenly over
+				// it. With no budget a collapsed tower (babel) put tens of thousands
+				// of particles in one frame and froze the game, on a monitor too
+				// (testers' report).
+				auto isOuter = [&](int x, int y, int z) {
+					return vmodel->IsSolid(x, y, z) &&
+					       !(x > 0 && y > 0 && z > 0 && x < (w - 1) && y < (h - 1) &&
+					         z < (d - 1) && vmodel->IsSolid(x + 1, y, z) &&
+					         vmodel->IsSolid(x - 1, y, z) && vmodel->IsSolid(x, y + 1, z) &&
+					         vmodel->IsSolid(x, y - 1, z) && vmodel->IsSolid(x, y, z + 1) &&
+					         vmodel->IsSolid(x, y, z - 1));
+				};
+				int outer = 0;
+				for (int x = 0; x < w; x++)
+					for (int y = 0; y < h; y++)
+						for (int z = 0; z < d; z++)
+							if (isOuter(x, y, z))
+								outer++;
+				constexpr int kDebrisVoxelBudget = 256;
+				const float keep =
+				  outer > kDebrisVoxelBudget ? (float)kDebrisVoxelBudget / (float)outer : 1.0F;
+				float carried = 0.0F;
+
 				for (int x = 0; x < w; x++) {
 					Vector3 p1 = vmOrigin + vmAxis1 * (float)x;
 					for (int y = 0; y < h; y++) {

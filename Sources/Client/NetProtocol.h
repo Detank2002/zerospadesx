@@ -85,6 +85,8 @@ namespace spades {
 			PacketTypePieMenu = 113,  // S2C, extension id 0x31 (`64 + extension id`)
 			PacketTypeFlashlight = 114, // S2C2P, extension id 0x32 (`64 + extension id`)
 			PacketTypeDaytimeWeather = 115, // S2C, extension id 0x33 (`64 + extension id`)
+			PacketTypePlayerOutfit = 117,   // S2C, extension id 0x35 (`64 + extension id`); see PlayerOutfit.h
+			PacketTypeVRPresence = 122, // C2S2P, extension id 58; see VRNetProtocol.h
 		};
 
 		/** Protocol extension ids, as negotiated through `PacketTypeExtensionInfo`. */
@@ -95,6 +97,8 @@ namespace spades {
 			ExtensionTypePieMenu = 0x31,
 			ExtensionTypeFlashlight = 0x32,
 			ExtensionTypeDaytimeWeather = 0x33,
+			ExtensionTypePlayerOutfit = 0x35,
+			ExtensionTypeVRPresence = 58,
 			ExtensionTypePlayerLimit = 192,
 			ExtensionTypeMessageTypes = 193,
 			ExtensionTypeKickReason = 194,

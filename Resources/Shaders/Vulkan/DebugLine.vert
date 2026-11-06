@@ -19,6 +19,10 @@
  */
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define ZS_VIEWS_SET 0
+#include "Multiview.glsl"
 
 layout(push_constant) uniform PushConstants {
 	mat4 projectionViewMatrix;
@@ -32,4 +36,5 @@ layout(location = 0) out vec4 fragColor;
 void main() {
 	gl_Position = pc.projectionViewMatrix * vec4(inPosition, 1.0);
 	fragColor = inColor;
+	gl_Position = ZS_CORRECT(gl_Position);
 }

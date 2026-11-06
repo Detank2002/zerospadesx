@@ -449,7 +449,7 @@ namespace spades {
 			} else if (tool == ToolBlock && isLocal) {
 				auto* listener = world.GetListener();
 
-				Vector3 muzzle = GetEye(), dir = GetFront();
+				Vector3 muzzle = GetToolOrigin(), dir = GetToolDirection();
 
 				const Handle<GameMap>& map = world.GetMap();
 				SPAssert(map);
@@ -606,8 +606,8 @@ namespace spades {
 			bool isLocal = this->IsLocalPlayer();
 			bool interp = cg_orientationSmoothing;
 
-			Vector3 dir = GetFront();
-			Vector3 muzzle = GetEye() + (dir * 0.01F);
+			Vector3 dir = GetToolDirection();
+			Vector3 muzzle = GetToolOrigin() + (dir * 0.01F);
 
 			// for hit-test debugging
 			std::unordered_map<int, HitTestDebugger::PlayerHit> playerHits;
@@ -856,7 +856,11 @@ namespace spades {
 					else if (input.crouch)
 						rec /= 2;
 
-					Turn(rec.x, rec.y);
+					// In a headset the view is the head: the gun takes the turn.
+					if (hasVRToolRay && listener)
+						listener->PlayerRecoiledInVR(*this, rec.x, rec.y);
+					else
+						Turn(rec.x, rec.y);
 				} else { // as in OpenSpades 0.1.3's way
 					// https://github.com/yvt/openspades/blob/v0.1.3/Sources/Client/Player.cpp#L760
 					// https://github.com/yvt/openspades/blob/v0.1.3/Sources/Client/Weapon.cpp
@@ -901,6 +905,11 @@ namespace spades {
 					if (input.crouch)
 						rec /= 2;
 
+					if (hasVRToolRay && listener) {
+						listener->PlayerRecoiledInVR(*this, rec.x, rec.y);
+						return;
+					}
+
 					o += GetUp() * rec.y;
 					o += GetRight() * rec.x;
 					o = o.Normalize();
@@ -932,9 +941,14 @@ namespace spades {
 				return;
 
 			if (IsLocalPlayer()) {
-				Vector3 const dir = GetFront();
-				Vector3 const muzzle = GetEye() + (dir * 0.1F);
-				Vector3 const vel = alive ? (dir + GetVelocity()) : Vector3(0, 0, 0);
+				Vector3 const dir = GetToolDirection();
+				Vector3 const muzzle = GetToolOrigin() + (dir * 0.1F);
+				// A VR throw carries the hand's own speed and direction; the server
+				// caps it at 2.0 relative to the thrower, which the client keeps under.
+				Vector3 const vel = !alive ? Vector3(0, 0, 0)
+				                           : hasVRThrowVelocity ? (vrThrowVelocity + GetVelocity())
+				                                                : (dir + GetVelocity());
+				hasVRThrowVelocity = false;
 
 				float const fuse = 3.0F - GetGrenadeCookTime();
 
@@ -959,7 +973,7 @@ namespace spades {
 
 			auto* listener = world.GetListener();
 
-			Vector3 muzzle = GetEye(), dir = GetFront();
+			Vector3 muzzle = GetToolOrigin(), dir = GetToolDirection();
 
 			const Handle<GameMap>& map = world.GetMap();
 			SPAssert(map);
@@ -979,7 +993,8 @@ namespace spades {
 					Player& other = maybeOther.value();
 					if (!other.IsAlive() || other.IsSpectator())
 						continue; // filter deads/spectators
-					if ((other.GetEye() - muzzle).GetSquaredLength() >
+					// From the eye, as on a monitor (the spade is in the hand in VR).
+					if ((other.GetEye() - GetEye()).GetSquaredLength() >
 						(MELEE_DISTANCE * MELEE_DISTANCE))
 						continue; // skip players outside attack range
 					if (!other.RayCastApprox(muzzle, dir))
@@ -995,7 +1010,10 @@ namespace spades {
 
 			Vector3 blockF = MakeVector3(outBlockPos) + 0.5F;
 			Vector3 shiftedPos = blockF + (MakeVector3(outBlockNormal) * 0.6F);
-			float hitBlockDist = ((dig ? blockF : shiftedPos) - muzzle).GetChebyshevLength();
+			// Reach from the eye, as building's (InBuildRange) and a monitor
+			// player's: in a headset the spade is in the hand, up to a block
+			// ahead of the eye, and measured from there it dug further.
+			float hitBlockDist = ((dig ? blockF : shiftedPos) - GetEye()).GetChebyshevLength();
 
 			if (mapResult.hit && hitBlockDist < MAX_DIG_DISTANCE && (!hitPlayer || dig)) {
 				if (map->IsValidMapCoord(outBlockPos.x, outBlockPos.y, outBlockPos.z)) {
@@ -1356,6 +1374,50 @@ namespace spades {
 				return true;
 			}
 			return false;
+		}
+
+		Vector3 Player::VRPushBody(const Vector3& delta) {
+			SPADES_MARK_FUNCTION();
+
+			const Handle<GameMap>& map = world.GetMap();
+			if (!map || !alive)
+				return Vector3(0, 0, 0);
+
+			// The body as BoxClipMove sees it: 0.45 either side, from just above the
+			// head down to a block above the feet (the step itself is the physics'
+			// business, not room-scale's). A resting body's feet sit anywhere
+			// inside the top block of the ground, so a sample nearer the feet than
+			// 1.05 can land in that block and call open ground a wall; 1.2 below
+			// the eye never does, and still meets a one-block step. Crouched, the
+			// feet are 0.9 nearer. vr_presence.py checks the same heights.
+			const float size = 0.45F;
+			const float standing[] = {-0.35F, 0.45F, 1.2F};
+			const float crouched[] = {-0.35F, 0.3F, 0.3F};
+			const float* levels = input.crouch ? crouched : standing;
+			auto clear = [&](float x, float y) {
+				for (int i = 0; i < 3; i++) {
+					float dz = levels[i];
+					float z = position.z + dz;
+					if (map->ClipBox(x - size, y - size, z) || map->ClipBox(x + size, y - size, z) ||
+					    map->ClipBox(x - size, y + size, z) || map->ClipBox(x + size, y + size, z))
+						return false;
+				}
+				return true;
+			};
+
+			Vector3 moved{0.0F, 0.0F, 0.0F};
+			// A wall stops the axis that runs into it and lets the other slide.
+			if (delta.x != 0.0F && clear(position.x + delta.x, position.y)) {
+				position.x += delta.x;
+				moved.x = delta.x;
+			}
+			if (delta.y != 0.0F && clear(position.x, position.y + delta.y)) {
+				position.y += delta.y;
+				moved.y = delta.y;
+			}
+			eye.x = position.x;
+			eye.y = position.y;
+			return moved;
 		}
 
 		void Player::RepositionPlayer(const spades::Vector3& pos) {

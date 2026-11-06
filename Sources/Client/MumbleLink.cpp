@@ -73,6 +73,10 @@ namespace spades {
 			priv->obj = nullptr;
 			return false;
 		}
+#elif defined(__ANDROID__)
+		// No POSIX shared memory in Android's libc, and no Mumble beside a
+		// standalone headset to share it with.
+		return false;
 #else
 		std::string name = "/MumbleLink." + std::to_string(getuid());
 

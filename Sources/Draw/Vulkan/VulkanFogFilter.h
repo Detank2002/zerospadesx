@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <vector>
 #include <vulkan/vulkan.h>
+#include "VulkanFramesInFlight.h"
 #include "VulkanPostProcessFilter.h"
 #include <Core/RefCountedObject.h>
 
@@ -70,7 +71,7 @@ namespace spades {
 			VkPipelineLayout fogClassicLayout;
 			VkPipeline       fogClassicPipeline;
 
-			static constexpr int MAX_FRAME_SLOTS = 2;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 			// Fog2's parameters of the frame, written once the GPU is done with them

@@ -49,6 +49,9 @@ namespace spades {
 			std::string TranslateButton(Uint8 b);
 			virtual int GetModState();
 			void ProcessEvent(SDL_Event& event, View&);
+			// Window pixels to 2D layout pixels, for the absolute pointer. 1 except
+			// with a headset, whose 2D layer has a layout of its own.
+			float mouseScaleX = 1.0F, mouseScaleY = 1.0F;
 			virtual void RunClientLoop(SDL_Window*, client::IRenderer* renderer,
 			                           client::IAudioDevice* dev);
 			virtual View* CreateView(client::IRenderer* renderer, client::IAudioDevice* dev) = 0;

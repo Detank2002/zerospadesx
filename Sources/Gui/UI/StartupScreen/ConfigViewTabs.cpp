@@ -47,7 +47,8 @@ namespace spades {
 		      helper(&ui->GetHelper()),
 		      r_renderer("r_renderer", nullptr),
 		      r_vulkan("r_vulkan", nullptr),
-		      r_fullscreen("r_fullscreen", nullptr) {
+		      r_fullscreen("r_fullscreen", nullptr),
+		      vr_enable("vr_enable", nullptr) {
 			UIManager* manager = &GetManager();
 			float mainWidth = size.x - 220.0F;
 
@@ -131,6 +132,24 @@ namespace spades {
 				e->activated = [this](UIElement& s) { OnDriverSoftware(s); };
 				AddChild(e.GetPointerOrNull());
 				driverSoftware = e.GetPointerOrNull();
+			}
+			{
+				Handle<CheckBox> e = Handle<CheckBox>::New(manager);
+				e->caption = _Tr("StartupScreen", "VR Headset");
+				float capSize = ui->GetFontManager().GetGuiFont().Measure(e->caption).x;
+				e->SetBounds(AABB2(410.0F, 30.0F, capSize + 18.0F, 24.0F));
+				WatchHelp(e.GetPointerOrNull(),
+				          [this](const std::string& s) { HandleHelpText(s); },
+				          _Tr("StartupScreen",
+				              "Plays in a VR headset through OpenXR (SteamVR, Meta Link, "
+				              "Virtual Desktop, WMR), with your tracked head and hands. Uses "
+				              "the Vulkan renderer. Menus appear on a panel in front of you: "
+				              "point with a controller and pull the trigger.\n\n"
+				              "Turn the headset on before pressing Start. Without one the "
+				              "game plays on the monitor as usual."));
+				e->activated = [this](UIElement& s) { OnVRCheck(s); };
+				AddChild(e.GetPointerOrNull());
+				vrCheck = e.GetPointerOrNull();
 			}
 
 			{
@@ -432,6 +451,7 @@ namespace spades {
 		void StartupScreenGraphicsTab::OnDriverOpenGL(UIElement&) {
 			r_vulkan = 0;
 			r_renderer = std::string("gl");
+			vr_enable = 0; // VR draws with Vulkan only
 			LoadConfig();
 		}
 
@@ -444,6 +464,16 @@ namespace spades {
 		void StartupScreenGraphicsTab::OnDriverSoftware(UIElement&) {
 			r_vulkan = 0;
 			r_renderer = std::string("sw");
+			vr_enable = 0;
+			LoadConfig();
+		}
+
+		void StartupScreenGraphicsTab::OnVRCheck(UIElement&) {
+			vr_enable = vrCheck->toggled ? 1 : 0;
+			if (vrCheck->toggled) {
+				r_vulkan = 1;
+				r_renderer = std::string("gl");
+			}
 			LoadConfig();
 		}
 
@@ -470,6 +500,10 @@ namespace spades {
 				configViewSoftware->visible = false;
 			}
 			fullscreenCheck->toggled = static_cast<int>(r_fullscreen) != 0;
+			// Greyed out when there is no OpenXR runtime (the help text says why).
+			vrCheck->enable = helper->CheckConfigCapability("vr_enable", "1").empty() &&
+			                  helper->CheckConfigCapability("r_renderer", "vulkan").empty();
+			vrCheck->toggled = vrCheck->enable && static_cast<int>(vr_enable) != 0;
 			driverOpenGL->enable = helper->CheckConfigCapability("r_renderer", "gl").empty();
 			driverVulkan->enable = helper->CheckConfigCapability("r_renderer", "vulkan").empty();
 			driverSoftware->enable = helper->CheckConfigCapability("r_renderer", "sw").empty();

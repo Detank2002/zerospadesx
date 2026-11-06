@@ -22,10 +22,12 @@
 
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <cstring>
 
 #include "../SW/SWFeatureLevel.h" // for fastRcp
 #include "VulkanBuffer.h"
+#include "VulkanFramesInFlight.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
 #include "VulkanSceneLights.h"
@@ -103,20 +105,25 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 
 			// The sprite's set, as the sprites lay it out: its view and its image
-			const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
+			// (and in multiview the eyes' views, at the sprites' binding 3)
+			const std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
 			  {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
 			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 			  {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			  {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+			   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 			}};
 			VkDescriptorSetLayoutCreateInfo layoutInfo{};
 			layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-			layoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+			layoutInfo.bindingCount = r.GetViewSetBuffer(0) ? 3 : 2;
 			layoutInfo.pBindings = bindings.data();
 			if (vkCreateDescriptorSetLayout(device->GetDevice(), &layoutInfo, nullptr,
 			                                &spriteSetLayout) != VK_SUCCESS)
 				SPRaise("Failed to create the long sprite descriptor set layout");
 
-			frames.resize(device->GetMaxFramesInFlight());
+			// A frame in flight's each, and at least one each for a headset's two
+			// eyes and its scope view, which are frames of their own
+			frames.resize(std::max<std::size_t>(device->GetMaxFramesInFlight(), MaxFrameSlots));
 			for (FrameResources& frame : frames)
 				CreateFrameResources(frame);
 		}
@@ -140,7 +147,7 @@ namespace spades {
 			frame.view = MakeHostBuffer(device, sizeof(GpuView), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
 			const std::array<VkDescriptorPoolSize, 2> poolSizes{{
-			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxImagesPerFrame},
+			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxImagesPerFrame * 2},
 			  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxImagesPerFrame},
 			}};
 			VkDescriptorPoolCreateInfo poolInfo{};
@@ -160,8 +167,7 @@ namespace spades {
 
 			// The sprite's set comes after the lit pipelines' three, as the sprites'.
 			const VkDescriptorSetLayout empty = renderer.GetSceneLights().GetEmptySetLayout();
-			const std::array<VkDescriptorSetLayout, VulkanSpriteRenderer::SpriteSet + 1> setLayouts{
-			  {empty, empty, empty, spriteSetLayout}};
+			std::vector<VkDescriptorSetLayout> setLayouts{empty, empty, empty, spriteSetLayout};
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 			pipelineLayoutInfo.setLayoutCount = static_cast<std::uint32_t>(setLayouts.size());
@@ -333,7 +339,7 @@ namespace spades {
 			const VkDescriptorBufferInfo viewInfo{frame.view->GetBuffer(), 0, VK_WHOLE_SIZE};
 			const VkDescriptorImageInfo imageInfo{image.GetSampler(), image.GetImageView(),
 			                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-			std::array<VkWriteDescriptorSet, 2> writes{};
+			std::array<VkWriteDescriptorSet, 3> writes{};
 			for (VkWriteDescriptorSet& write : writes) {
 				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 				write.dstSet = set;
@@ -345,8 +351,18 @@ namespace spades {
 			writes[1].dstBinding = 1;
 			writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			writes[1].pImageInfo = &imageInfo;
-			vkUpdateDescriptorSets(vkDevice, static_cast<std::uint32_t>(writes.size()), writes.data(),
-			                       0, nullptr);
+			std::uint32_t writeCount = 2;
+			// Multiview: this frame slot's eye views
+			VkDescriptorBufferInfo eyeViewsInfo{};
+			if (VulkanBuffer* views = renderer.GetViewSetBuffer(
+			      static_cast<std::size_t>(&frame - frames.data()))) {
+				eyeViewsInfo = {views->GetBuffer(), 0, VK_WHOLE_SIZE};
+				writes[2].dstBinding = 3;
+				writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				writes[2].pBufferInfo = &eyeViewsInfo;
+				writeCount = 3;
+			}
+			vkUpdateDescriptorSets(vkDevice, writeCount, writes.data(), 0, nullptr);
 
 			frame.imageSets.emplace(&image, set);
 			frame.images.push_back(Handle<VulkanImage>(&image));
@@ -567,7 +583,10 @@ namespace spades {
 			frame.images.clear();
 
 			BuildGeometry();
-			Clear();
+			// A headset draws the scene once per eye: the list is kept for the
+			// next eye's pass, and emptied after the last.
+			if (!renderer.KeepsSceneLists())
+				Clear();
 			if (indices.empty())
 				return;
 

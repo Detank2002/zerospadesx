@@ -19,6 +19,10 @@
  */
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define ZS_VIEWS_SET 0
+#include "Multiview.glsl"
 
 layout(push_constant) uniform PushConstants {
 	vec3 fogColor;
@@ -29,8 +33,11 @@ layout(push_constant) uniform PushConstants {
 	float _pad2;
 	vec3 viewAxisSide;
 	float _pad3;
-	float fovX;
-	float fovY;
+	// The view's edges as tangents: left and down negative.
+	float tanLeft;
+	float tanRight;
+	float tanDown;
+	float tanUp;
 } pushConstants;
 
 layout(location = 0) in vec2 positionAttribute;
@@ -42,14 +49,18 @@ void main() {
 	// Set depth to 1.0 (far plane in Vulkan standard depth)
 	gl_Position = vec4(positionAttribute, 1.0, 1.0);
 
-	// Compute view direction for this screen position
-	float tanFovX = tan(pushConstants.fovX * 0.5);
-	float tanFovY = tan(pushConstants.fovY * 0.5);
+	// Compute view direction for this screen position: the edge tangents
+	// interpolated across the screen, so an off-centre view (a headset eye)
+	// gets its own rays.
+	vec2 at = positionAttribute * 0.5 + 0.5;
+	float tanX = mix(pushConstants.tanLeft, pushConstants.tanRight, at.x);
+	// With flipped viewport, positionAttribute.y is already inverted, so +1 is up
+	float tanY = mix(pushConstants.tanDown, pushConstants.tanUp, at.y);
 
 	vec3 front = pushConstants.viewAxisFront;
 	vec3 right = pushConstants.viewAxisSide;
 	vec3 up = pushConstants.viewAxisUp;
 
-	// With flipped viewport, positionAttribute.y is already inverted, so use positive up
-	viewDir = normalize(front + right * positionAttribute.x * tanFovX + up * positionAttribute.y * tanFovY);
+	viewDir = normalize(front + right * tanX + up * tanY);
+	gl_Position = ZS_CORRECT(gl_Position);
 }

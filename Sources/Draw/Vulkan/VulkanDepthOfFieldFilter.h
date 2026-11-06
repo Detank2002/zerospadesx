@@ -80,7 +80,7 @@ namespace spades {
 			VkPipelineLayout passthroughLayout;
 			VkPipeline passthroughPipeline;
 
-			static constexpr int MAX_FRAME_SLOTS = MaxFramesInFlight;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 

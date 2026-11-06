@@ -25,8 +25,17 @@
 // kept fragment coords in pixel space.
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
 
-layout(set = 0, binding = 0) uniform sampler2D mainTexture;
+layout(set = 0, binding = 0) uniform ZS_EYE_SAMPLER mainTexture;
 
 layout(push_constant) uniform PushConstants {
     vec2 inverseVP;
@@ -39,12 +48,12 @@ layout(location = 0) out vec4 outColor;
 #define FXAA_REDUCE_MUL   (1.0 / 8.0)
 #define FXAA_SPAN_MAX     8.0
 
-vec4 applyFXAA(vec2 uv, sampler2D tex, vec2 invVP) {
-    vec3 rgbNW = texture(tex, uv + vec2(-1.0, -1.0) * invVP).xyz;
-    vec3 rgbNE = texture(tex, uv + vec2( 1.0, -1.0) * invVP).xyz;
-    vec3 rgbSW = texture(tex, uv + vec2(-1.0,  1.0) * invVP).xyz;
-    vec3 rgbSE = texture(tex, uv + vec2( 1.0,  1.0) * invVP).xyz;
-    vec3 rgbM  = texture(tex, uv).xyz;
+vec4 applyFXAA(vec2 uv, ZS_EYE_SAMPLER tex, vec2 invVP) {
+    vec3 rgbNW = ZS_EYE_TEX(tex, uv + vec2(-1.0, -1.0) * invVP).xyz;
+    vec3 rgbNE = ZS_EYE_TEX(tex, uv + vec2( 1.0, -1.0) * invVP).xyz;
+    vec3 rgbSW = ZS_EYE_TEX(tex, uv + vec2(-1.0,  1.0) * invVP).xyz;
+    vec3 rgbSE = ZS_EYE_TEX(tex, uv + vec2( 1.0,  1.0) * invVP).xyz;
+    vec3 rgbM  = ZS_EYE_TEX(tex, uv).xyz;
 
     vec3 luma = vec3(0.299, 0.587, 0.114);
     float lumaNW = dot(rgbNW, luma);
@@ -69,11 +78,11 @@ vec4 applyFXAA(vec2 uv, sampler2D tex, vec2 invVP) {
                   dir * rcpDirMin)) * invVP;
 
     vec3 rgbA = 0.5 * (
-        texture(tex, uv + dir * (1.0 / 3.0 - 0.5)).xyz +
-        texture(tex, uv + dir * (2.0 / 3.0 - 0.5)).xyz);
+        ZS_EYE_TEX(tex, uv + dir * (1.0 / 3.0 - 0.5)).xyz +
+        ZS_EYE_TEX(tex, uv + dir * (2.0 / 3.0 - 0.5)).xyz);
     vec3 rgbB = rgbA * 0.5 + 0.25 * (
-        texture(tex, uv + dir * -0.5).xyz +
-        texture(tex, uv + dir *  0.5).xyz);
+        ZS_EYE_TEX(tex, uv + dir * -0.5).xyz +
+        ZS_EYE_TEX(tex, uv + dir *  0.5).xyz);
 
     float lumaB = dot(rgbB, luma);
     return ((lumaB < lumaMin) || (lumaB > lumaMax))

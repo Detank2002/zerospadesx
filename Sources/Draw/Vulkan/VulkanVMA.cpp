@@ -21,4 +21,12 @@
 // VMA single-header implementation unit.
 // Compiled once to avoid duplicate symbol issues.
 #define VMA_IMPLEMENTATION
+#if defined(__ANDROID__)
+// Android's libvulkan.so exports Vulkan 1.1 at most, and the headers are newer:
+// linked statically, VMA reaches for 1.3 entry points that are not there. Look
+// them up through the device instead (SDLVulkanDevice passes the proc-address
+// functions), which takes whatever the headset's driver has.
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#endif
 #include "VulkanMemoryAllocator.h"

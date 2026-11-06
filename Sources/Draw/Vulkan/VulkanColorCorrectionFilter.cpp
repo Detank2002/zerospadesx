@@ -21,6 +21,7 @@
 #include "VulkanColorCorrectionFilter.h"
 #include "VulkanSettings.h"
 #include "VulkanPushConstants.h"
+#include "VulkanSpirvCache.h"
 #include "VulkanFramebufferManager.h"
 #include "VulkanImage.h"
 #include "VulkanRenderer.h"
@@ -99,6 +100,8 @@ namespace spades {
 			}
 
 			if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, pipeline, nullptr);
+			if (pipelineMV != VK_NULL_HANDLE) vkDestroyPipeline(dev, pipelineMV, nullptr);
+			if (ppRenderPassMV != VK_NULL_HANDLE) vkDestroyRenderPass(dev, ppRenderPassMV, nullptr);
 			if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, layout, nullptr);
 			if (blurPipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, blurPipeline, nullptr);
 			if (blurLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, blurLayout, nullptr);
@@ -125,6 +128,10 @@ namespace spades {
 			    VK_IMAGE_LAYOUT_UNDEFINED,
 			    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			    &dep);
+			if (renderer.IsMultiview())
+				ppRenderPassMV = CreateSimpleColorRenderPass(
+				    dev, colorFormat, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+				    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &dep, 0x3);
 
 			VkSamplerCreateInfo si{};
 			si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -169,6 +176,7 @@ namespace spades {
 			std::string data = FileManager::ReadAllBytes(path);
 			std::vector<uint32_t> code(data.size() / sizeof(uint32_t));
 			std::memcpy(code.data(), data.data(), data.size());
+			SpirvCache::CheckPushConstants(code, path);
 
 			VkShaderModuleCreateInfo info{};
 			info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -182,7 +190,8 @@ namespace spades {
 		}
 
 		VkPipeline VulkanColorCorrectionFilter::BuildPipeline(const char* fragmentShader,
-		                                                      VkPipelineLayout pipelineLayout) {
+		                                                      VkPipelineLayout pipelineLayout,
+		                                                      VkRenderPass renderPass) {
 			VkDevice dev = device->GetDevice();
 			VkPipelineCache cache = renderer.GetPipelineCache();
 
@@ -248,7 +257,7 @@ namespace spades {
 			pi.pColorBlendState = &blend;
 			pi.pDynamicState = &dyn;
 			pi.layout = pipelineLayout;
-			pi.renderPass = ppRenderPass;
+			pi.renderPass = renderPass != VK_NULL_HANDLE ? renderPass : ppRenderPass;
 			pi.subpass = 0;
 
 			VkPipeline built = VK_NULL_HANDLE;
@@ -274,6 +283,11 @@ namespace spades {
 			if (vkCreatePipelineLayout(dev, &li, nullptr, &layout) != VK_SUCCESS)
 				SPRaise("Failed to create ColorCorrection pipeline layout");
 			pipeline = BuildPipeline("Shaders/Vulkan/PostFilters/ColorCorrection.vk.fs.spv", layout);
+			// Multiview: the same pass over both eyes' layers, sampling each
+			// fragment's own (the .mv shader reads a sampler2DArray at gl_ViewIndex).
+			if (ppRenderPassMV != VK_NULL_HANDLE)
+				pipelineMV = BuildPipeline("Shaders/Vulkan/PostFilters/ColorCorrection.vk.fs.mv.spv",
+				                           layout, ppRenderPassMV);
 
 			const VkPushConstantRange blurRange =
 			  PushConstantRange<BlurPushConstants>(VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -300,11 +314,12 @@ namespace spades {
 			}
 		}
 
-		VkFramebuffer VulkanColorCorrectionFilter::MakeFramebuffer(VulkanImage* image, int frameSlot) {
+		VkFramebuffer VulkanColorCorrectionFilter::MakeFramebuffer(VulkanImage* image, int frameSlot,
+		                                                           VkRenderPass pass) {
 			VkImageView view = image->GetImageView();
 			VkFramebufferCreateInfo fbInfo{};
 			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-			fbInfo.renderPass = ppRenderPass;
+			fbInfo.renderPass = pass;
 			fbInfo.attachmentCount = 1;
 			fbInfo.pAttachments = &view;
 			fbInfo.width = image->GetWidth();
@@ -466,13 +481,16 @@ namespace spades {
 			// The horizontal half of the sharpening's blur, in its own pass
 			Handle<VulkanImage> blurred;
 			VulkanTemporaryImagePool* pool = renderer.GetTemporaryImagePool();
-			if (sharpeningFinalGain > 0.0F && pool) {
+			// Both eyes at once when given both layers (multiview). The sharpening's
+			// blur has no layered pass yet, so multiview goes without it.
+			const bool layered = input->GetArrayLayers() > 1 && pipelineMV != VK_NULL_HANDLE;
+			if (sharpeningFinalGain > 0.0F && pool && !layered) {
 				blurred = pool->Acquire(input->GetWidth(), input->GetHeight(), colorFormat);
 
 				VkRenderPassBeginInfo blurBegin{};
 				blurBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 				blurBegin.renderPass = ppRenderPass;
-				blurBegin.framebuffer = MakeFramebuffer(blurred.GetPointerOrNull(), frameSlot);
+				blurBegin.framebuffer = MakeFramebuffer(blurred.GetPointerOrNull(), frameSlot, ppRenderPass);
 				blurBegin.renderArea.extent = {blurred->GetWidth(), blurred->GetHeight()};
 				vkCmdBeginRenderPass(cmd, &blurBegin, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -495,14 +513,15 @@ namespace spades {
 				pc.sharpeningFinalGain = 0.0F;
 			}
 
-			VkFramebuffer fb = MakeFramebuffer(output, frameSlot);
+			const VkRenderPass pass = layered ? ppRenderPassMV : ppRenderPass;
+			VkFramebuffer fb = MakeFramebuffer(output, frameSlot, pass);
 			VkDescriptorSet dsSet =
 			  BindTextures(frameSlot, input->GetImageView(),
 			               blurred ? blurred->GetImageView() : input->GetImageView());
 
 			VkRenderPassBeginInfo rpBegin{};
 			rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-			rpBegin.renderPass = ppRenderPass;
+			rpBegin.renderPass = pass;
 			rpBegin.framebuffer = fb;
 			rpBegin.renderArea.extent = {w, h};
 
@@ -513,7 +532,7 @@ namespace spades {
 			vkCmdSetViewport(cmd, 0, 1, &viewport);
 			vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layered ? pipelineMV : pipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			                        layout, 0, 1, &dsSet, 0, nullptr);
 			PushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, pc);

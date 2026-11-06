@@ -21,6 +21,7 @@
 #include "VulkanProgramManager.h"
 #include "VulkanProgram.h"
 #include "VulkanShader.h"
+#include "VulkanSpirvCache.h"
 #include <Gui/SDLVulkanDevice.h>
 #include <Core/Debug.h>
 #include <Core/Exception.h>
@@ -150,10 +151,8 @@ namespace spades {
 
 			auto shader = Handle<VulkanShader>::New(device, type, name);
 
-			// Load pre-compiled SPIR-V binary
-			std::string source = FileManager::ReadAllBytes(name.c_str());
-			std::vector<uint32_t> spirvCode(source.size() / sizeof(uint32_t));
-			memcpy(spirvCode.data(), source.data(), source.size());
+			// Load pre-compiled SPIR-V binary (its multiview variant in multiview)
+			std::vector<uint32_t> spirvCode = SpirvCache::Load(name);
 			shader->LoadSPIRV(spirvCode);
 
 			return shader;

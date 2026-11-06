@@ -24,10 +24,31 @@
 
 namespace spades {
 	namespace client {
+		/**
+		 * A view's edges as the tangents of their angles from the view axis: left
+		 * and down are negative, right and up positive. A centred view has
+		 * left = -right and down = -up; a headset's eyes are not centred (each
+		 * sees further to its own side than towards the nose).
+		 */
+		struct FovTangents {
+			float left, right, down, up;
+			float Width() const { return right - left; }
+			float Height() const { return up - down; }
+		};
+
 		struct SceneDefinition {
 			int viewportLeft, viewportTop;
 			int viewportWidth, viewportHeight;
+			/** The full angles. With `asymmetric` set they are the smallest centred
+			 * view that covers `tangents`, kept for code that only needs a bound. */
 			float fovX, fovY;
+			/** When set, `tangents` is the view; otherwise it is centred on fovX/fovY. */
+			bool asymmetric = false;
+			FovTangents tangents{};
+			/** The view's edges, whichever way it was given. Everything that turns a
+			 * screen position into a ray, or a ray into a screen position, goes
+			 * through this. */
+			FovTangents GetFovTangents() const;
 			Vector3 viewOrigin;
 			Vector3 viewAxis[3];
 			float zNear, zFar;
@@ -51,6 +72,23 @@ namespace spades {
 			float saturation;
 			float radialBlur;
 
+			/** One eye of a headset view, in world space. */
+			struct VREye {
+				Vector3 origin;
+				Vector3 axis[3];
+				float fovX, fovY;
+				/** The eye's own frustum, as the runtime gives it, unless the
+				 * symmetric one is drawn (vr_symmetricFrustum). */
+				bool asymmetric = false;
+				FovTangents tangents{};
+			};
+
+			/** 2 when the frame goes to a headset: a renderer that can draws each of
+			 * `vrEyes` instead of the single view above, which then stands for the
+			 * head (sound, culling of the 2D overlay). 0 otherwise. Renderers that
+			 * know nothing of VR ignore it and draw the single view. */
+			int numVREyes = 0;
+			VREye vrEyes[2];
 			/** The factor the sun's light is drawn with, in `[0, 1]`. At `0` the sun
 			 * casts no light and no shadow. */
 			float sunlight;

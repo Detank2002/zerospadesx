@@ -19,6 +19,7 @@
  */
 
 #include "Corpse.h"
+#include "PlayerOutfit.h"
 #include "GameMap.h"
 #include "IModel.h"
 #include "IRenderer.h"
@@ -34,12 +35,17 @@ DEFINE_SPADES_SETTING(cg_corpseLineCollision, "0");
 DEFINE_SPADES_SETTING(cg_corpseDisableGravity, "0");
 
 SPADES_SETTING(cg_classicPlayerModels);
+SPADES_SETTING(cg_customPlayerModels);
 
 namespace spades {
 	namespace client {
-		Corpse::Corpse(IRenderer& renderer, GameMap& map, Player& p, bool isChristmasOn)
-			: renderer{renderer}, map{map}, isChristmasOn{isChristmasOn} {
+		Corpse::Corpse(IRenderer& renderer, GameMap& map, Player& p, bool isChristmasOn,
+		               const PlayerOutfits* models)
+			: renderer{renderer}, map{map}, isChristmasOn{isChristmasOn}, models{models} {
 			SPADES_MARK_FUNCTION();
+
+			if (models && cg_customPlayerModels)
+				modelSet = models->GetModelName(p.GetId(), p.GetTeamId());
 
 			playerId = p.GetId();
 			color = ConvertColorRGB(p.GetColor());
@@ -516,6 +522,11 @@ namespace spades {
 				nodes[i].lastForce = nodes[i].vel - nodes[i].lastForce;
 		}
 
+		std::string Corpse::ModelPart(const std::string& modelPath, const std::string& part) const {
+			std::string usual = modelPath + part + ".kv6";
+			return models ? models->ResolvePart(modelSet, part, usual) : usual;
+		}
+
 		void Corpse::AddToScene() {
 			Handle<IModel> model;
 			ModelRenderParam param;
@@ -538,7 +549,7 @@ namespace spades {
 
 			// Torso
 			{
-				model = renderer.RegisterModel((modelPath + "Torso.kv6").c_str());
+				model = renderer.RegisterModel(ModelPart(modelPath, "Torso").c_str());
 
 				Vector3 tX, tY, tZ;
 				tX = ((tX1 + tX2) * 0.5F).Normalize();
@@ -555,7 +566,7 @@ namespace spades {
 			{
 				model = isChristmasOn
 					? renderer.RegisterModel("Models/Player/XmasHat.kv6")
-					: renderer.RegisterModel((modelPath + "Head.kv6").c_str());
+					: renderer.RegisterModel(ModelPart(modelPath, "Head").c_str());
 
 				const Vector3 headBase = (torso * MakeVector3(0.0F, 0.0F, 0.0F)).GetXYZ();
 
@@ -576,7 +587,7 @@ namespace spades {
 					* Matrix4::Scale(0.75F, 0.75F, 1.0F)
 					* Matrix4::Scale(-1, -1, 1);
 
-				model = renderer.RegisterModel((modelPath + "ArmRight.kv6").c_str());
+				model = renderer.RegisterModel(ModelPart(modelPath, "ArmRight").c_str());
 				Vector3 aX, aY, aZ;
 				aZ = (nodes[Arm1].pos - nodes[Torso1].pos).Normalize();
 				aY = Vector3::Cross(tX1, aZ).Normalize();
@@ -584,7 +595,7 @@ namespace spades {
 				param.matrix = Matrix4::FromAxis(aY, -aX, aZ, arm1Base) * armsScale;
 				renderer.RenderModel(*model, param);
 
-				model = renderer.RegisterModel((modelPath + "Arm.kv6").c_str());
+				model = renderer.RegisterModel(ModelPart(modelPath, "Arm").c_str());
 				aZ = (nodes[Arm2].pos - nodes[Torso2].pos).Normalize();
 				aY = Vector3::Cross(tX1, aZ).Normalize();
 				aX = Vector3::Cross(aY, aZ).Normalize();
@@ -597,7 +608,7 @@ namespace spades {
 				const Vector3 leg1Base = (torso * MakeVector3(0.25F, 0.0F, 0.9F)).GetXYZ();
 				const Vector3 leg2Base = (torso * MakeVector3(-0.25F, 0.0F, 0.9F)).GetXYZ();
 
-				model = renderer.RegisterModel((modelPath + "LegRight.kv6").c_str());
+				model = renderer.RegisterModel(ModelPart(modelPath, "LegRight").c_str());
 				Vector3 aX, aY, aZ;
 				aZ = (nodes[Leg1].pos - nodes[Torso3].pos).Normalize();
 				aY = Vector3::Cross(tX1, aZ).Normalize();
@@ -605,7 +616,7 @@ namespace spades {
 				param.matrix = Matrix4::FromAxis(aX, aY, aZ, leg1Base) * scaler;
 				renderer.RenderModel(*model, param);
 
-				model = renderer.RegisterModel((modelPath + "Leg.kv6").c_str());
+				model = renderer.RegisterModel(ModelPart(modelPath, "Leg").c_str());
 				aZ = (nodes[Leg2].pos - nodes[Torso4].pos).Normalize();
 				aY = Vector3::Cross(tX1, aZ).Normalize();
 				aX = Vector3::Cross(aY, aZ).Normalize();

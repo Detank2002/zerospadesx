@@ -20,10 +20,12 @@
 
 #include "VulkanSpriteRenderer.h"
 #include "VulkanSettings.h"
+#include "VulkanFramesInFlight.h"
 #include "VulkanPushConstants.h"
 
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <cmath>
 #include <cstring>
 
@@ -117,21 +119,28 @@ namespace spades {
 
 			// The sprite's set: its view, its image, and the scene's depth to fade into
 			const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-			std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
+			std::vector<VkDescriptorSetLayoutBinding> bindings{
 			  {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr},
 			  {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-			  {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-			}};
+			};
+			// Sprites drawn in the scene's pass can't read the depth it is testing.
+			if (softParticles)
+				bindings.push_back(
+				  {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+			// Multiview: the eyes' views (ZsViews), so no pipeline needs a fifth set
+			if (renderer.GetViewSetBuffer(0))
+				bindings.push_back({3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr});
 			VkDescriptorSetLayoutCreateInfo layoutInfo{};
 			layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-			// Sprites drawn in the scene's pass can't read the depth it is testing.
-			layoutInfo.bindingCount = softParticles ? 3 : 2;
+			layoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
 			layoutInfo.pBindings = bindings.data();
 			if (vkCreateDescriptorSetLayout(vkDevice, &layoutInfo, nullptr, &spriteSetLayout) !=
 			    VK_SUCCESS)
 				SPRaise("Failed to create the sprite descriptor set layout");
 
-			frames.resize(device->GetMaxFramesInFlight());
+			// A frame in flight's each, and at least one each for a headset's two
+			// eyes and its scope view, which are frames of their own
+			frames.resize(std::max<std::size_t>(device->GetMaxFramesInFlight(), MaxFrameSlots));
 			for (FrameResources& frame : frames)
 				CreateFrameResources(frame);
 		}
@@ -174,7 +183,7 @@ namespace spades {
 			ReserveInstances(frame, kInitialInstanceCapacity);
 
 			std::array<VkDescriptorPoolSize, 2> poolSizes{{
-			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxImagesPerFrame},
+			  {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxImagesPerFrame * 2},
 			  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxImagesPerFrame * 2},
 			}};
 			VkDescriptorPoolCreateInfo poolInfo{};
@@ -359,8 +368,8 @@ namespace spades {
 			// These sprites are lit by the scene's lights alone (set 2), at their
 			// corners; the map's and the model shadows' sets are of no use to them.
 			const VkDescriptorSetLayout empty = renderer.GetSceneLights().GetEmptySetLayout();
-			const std::array<VkDescriptorSetLayout, SpriteSet + 1> setLayouts{
-			  {empty, empty, renderer.GetSceneLights().GetSetLayout(), spriteSetLayout}};
+			std::vector<VkDescriptorSetLayout> setLayouts{
+			  empty, empty, renderer.GetSceneLights().GetSetLayout(), spriteSetLayout};
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 			pipelineLayoutInfo.setLayoutCount = static_cast<std::uint32_t>(setLayouts.size());
@@ -377,6 +386,15 @@ namespace spades {
 				return;
 			}
 
+			// Multiview draws every sprite at full resolution: the quarter-resolution
+			// layer is one view's.
+			if (renderer.IsMultiview()) {
+				pipeline = BuildPipeline(pipelineLayout, "Shaders/Vulkan/SoftSprite.vert.spv",
+				                         "Shaders/Vulkan/SoftSprite.frag.spv", false,
+				                         renderer.GetFramebufferManager()->GetSpriteRenderPass(),
+				                         device->GetSampleCount(), Layer::Every);
+				return;
+			}
 			CreateLowResolutionResources();
 			pipeline = BuildPipeline(pipelineLayout, "Shaders/Vulkan/SoftSprite.vert.spv",
 			                         "Shaders/Vulkan/SoftSprite.frag.spv", false,
@@ -544,10 +562,9 @@ namespace spades {
 
 			// The lit pipelines' sets, then the sprite's own. A later map's sets are
 			// laid out the same, so they still bind to it.
-			const std::array<VkDescriptorSetLayout, SpriteSet + 1> setLayouts{
-			  {mapRenderer->GetShadowDescriptorSetLayout(),
-			   shadowMapRenderer->GetSamplingSetLayout(), renderer.GetSceneLights().GetSetLayout(),
-			   spriteSetLayout}};
+			std::vector<VkDescriptorSetLayout> setLayouts{
+			  mapRenderer->GetShadowDescriptorSetLayout(), shadowMapRenderer->GetSamplingSetLayout(),
+			  renderer.GetSceneLights().GetSetLayout(), spriteSetLayout};
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 			pipelineLayoutInfo.setLayoutCount = static_cast<std::uint32_t>(setLayouts.size());
@@ -556,6 +573,14 @@ namespace spades {
 			                           &litPipelineLayout) != VK_SUCCESS)
 				SPRaise("Failed to create the lit sprite pipeline layout");
 
+			if (renderer.IsMultiview()) { // no quarter-resolution layer (CreatePipeline)
+				litPipeline = BuildPipeline(
+				  litPipelineLayout, "Shaders/Vulkan/SoftLitSprite.vert.spv",
+				  "Shaders/Vulkan/SoftLitSprite.frag.spv", true,
+				  renderer.GetFramebufferManager()->GetSpriteRenderPass(), device->GetSampleCount(),
+				  Layer::Every);
+				return true;
+			}
 			litPipeline = BuildPipeline(litPipelineLayout, "Shaders/Vulkan/SoftLitSprite.vert.spv",
 			                            "Shaders/Vulkan/SoftLitSprite.frag.spv", true,
 			                            renderer.GetFramebufferManager()->GetSpriteRenderPass(),
@@ -629,7 +654,7 @@ namespace spades {
 			  {image.GetSampler(), image.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			  {},
 			}};
-			std::array<VkWriteDescriptorSet, 3> writes{};
+			std::array<VkWriteDescriptorSet, 4> writes{};
 			for (VkWriteDescriptorSet& write : writes) {
 				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 				write.dstSet = set;
@@ -653,6 +678,16 @@ namespace spades {
 				writes[2].pImageInfo = &imageInfos[1];
 				writeCount = 3;
 				frame.images.push_back(depth);
+			}
+			// Multiview: this frame slot's eye views
+			VkDescriptorBufferInfo eyeViewsInfo{};
+			if (VulkanBuffer* views = renderer.GetViewSetBuffer(
+			      static_cast<std::size_t>(&frame - frames.data()))) {
+				eyeViewsInfo = {views->GetBuffer(), 0, VK_WHOLE_SIZE};
+				VkWriteDescriptorSet& write = writes[writeCount++];
+				write.dstBinding = 3;
+				write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				write.pBufferInfo = &eyeViewsInfo;
 			}
 			vkUpdateDescriptorSets(vkDevice, writeCount, writes.data(), 0, nullptr);
 
@@ -826,7 +861,7 @@ namespace spades {
 				  return sprite.radius * sprite.radius * 4.0F / depth > lowResolutionStart;
 			  });
 			VulkanTemporaryImagePool* pool = renderer.GetTemporaryImagePool();
-			if (!anyLowResolution || !pool)
+			if (!anyLowResolution || !pool || lowPipeline == VK_NULL_HANDLE)
 				return;
 
 			const std::uint32_t width =
@@ -908,7 +943,10 @@ namespace spades {
 
 			frame.prepared = false;
 			frame.lowResolution = Handle<VulkanImage>();
-			Clear();
+			// A headset draws the scene once per eye: the list is kept for the
+			// next eye's pass, and emptied after the last.
+			if (!renderer.KeepsSceneLists())
+				Clear();
 		}
 	} // namespace draw
 } // namespace spades

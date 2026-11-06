@@ -68,9 +68,15 @@ namespace spades {
 			for (auto& rayDir : rays)
 				rayDir = RandomUnitVector();
 
-			w = map->Width();
-			h = map->Height();
-			d = map->Depth();
+			// Inactive: nothing reads this one (r_radiosity and r_physicalLighting
+			// off), but the map's descriptor set still names it. It then covers a
+			// single chunk and never updates, instead of a whole map's worth of 3D
+			// texture and a CPU copy of it: the radiosity and ambient shadow
+			// together were about 800MB a map, which on a Quest (where it is all
+			// the same memory) is what got the game killed for running out.
+			w = active ? map->Width() : ChunkSize;
+			h = active ? map->Height() : ChunkSize;
+			d = active ? map->Depth() : ChunkSize;
 
 			// No chunks at all for the placeholders: chunks.size() is always
 			// chunkW * chunkH * chunkD, so every walk over them is empty too

@@ -44,12 +44,15 @@
 #include "GameMap.h"
 #include "Grenade.h"
 #include "Weapon.h"
+#include "VRState.h"
 #include "World.h"
 
 #include "NetClient.h"
 
 DEFINE_SPADES_SETTING(cg_fov, "68");
 DEFINE_SPADES_SETTING(cg_horizontalFov, "0");
+// A test of the off-centre view a headset eye has, on a monitor (see below).
+DEFINE_SPADES_SETTING(r_debugOffCentre, "0");
 DEFINE_SPADES_SETTING(cg_classicZoom, "0");
 DEFINE_SPADES_SETTING(cg_spectatorZoomScale, "4");
 DEFINE_SPADES_SETTING(cg_thirdperson, "0");
@@ -318,8 +321,9 @@ namespace spades {
 							}
 						}
 
-						// hurt effect
-						if (cg_hurtScreenEffects) {
+						// hurt effect. Not in a headset: the whole view losing its
+						// colour and blurring at each hit made testers sick
+						if (cg_hurtScreenEffects && !IsVRFrameActive()) {
 							float hpper = p.GetHealth() / 100.0F;
 							float timeSinceLastHurt = time - lastHurtTime;
 							if (time >= lastHurtTime && timeSinceLastHurt < 0.15F) {
@@ -552,6 +556,23 @@ namespace spades {
 			SPAssert(!def.viewOrigin.IsNaN());
 
 			def.radialBlur = std::min(def.radialBlur, 1.0F);
+
+			// r_debugOffCentre s: draw the monitor's view off-centre, its left edge
+			// moved a fraction s of the way to the middle, the way a headset eye's
+			// view is not centred. At 1 the picture is the right half of the usual
+			// one stretched over the window; anything that still assumes a centred
+			// view (fog, water, sky, culling) shows up as a mismatch with that half.
+			if ((float)r_debugOffCentre > 0.0F && def.fovX > 0.0F && def.fovY > 0.0F &&
+			    !IsVRFrameActive()) {
+				const float s = std::min((float)r_debugOffCentre, 1.0F);
+				const float tx = std::tan(def.fovX * 0.5F), ty = std::tan(def.fovY * 0.5F);
+				def.asymmetric = true;
+				def.tangents = FovTangents{-tx * (1.0F - s), tx, -ty, ty};
+			}
+
+			// In a headset the view is the head's, whatever the camera mode picked
+			// above; only its position is kept.
+			ApplyVRToSceneDefinition(def, GetCameraMode());
 
 			return def;
 		}

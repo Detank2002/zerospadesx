@@ -21,6 +21,7 @@
 #pragma once
 
 #include "View.h"
+#include <future>
 #include <Client/IAudioDevice.h>
 #include <Client/IRenderer.h>
 #include <Core/RefCountedObject.h>
@@ -48,6 +49,18 @@ namespace spades {
 			void DoInit();
 
 			void RestoreRenderer();
+
+			// The headset's menus stand on a map, not in a void (vr_menuScene):
+			// one generated (Training/MapGen.h) on a thread of its own, the first
+			// time a menu is seen in a headset.
+			std::future<client::GameMap*> vrMenuMapLoad;
+			Handle<client::GameMap> vrMenuMap;
+			bool vrMenuMapStarted = false;
+			bool vrMenuMapSet = false; // the renderer has it (a game replaces it)
+			bool vrMenuAnchored = false;
+			Vector3 vrMenuAnchor; // the head where the menu scene began, tracking space
+			Vector3 vrMenuEye;    // where that head is in the world
+			void DrawVRMenuScene();
 
 			std::string Connect(const ServerAddress &host);
 		std::string PlayDemo(const std::string &demoPath);

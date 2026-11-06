@@ -37,6 +37,13 @@ namespace spades {
 		class SDLVulkanDevice : public RefCountedObject {
 			SDL_Window* window;
 			int w, h;
+			// No surface and no swapchain: the headset is the only display
+			// (vr_mirror 0, and a standalone headset, which has no window to show).
+			// The "swapchain" is then a few images of our own that nothing presents,
+			// so the renderer runs unchanged.
+			bool headless;
+			std::vector<VmaAllocation> offscreenAllocations;
+			uint32_t offscreenNext = 0;
 
 			// Vulkan core objects
 			VkInstance instance;
@@ -83,6 +90,9 @@ namespace spades {
 			bool fillModeNonSolidSupported{false};
 			bool wideLinesSupported{false};
 			bool geometryShaderSupported{false};
+			bool multiviewSupported = false;
+			bool fragmentDensityMapSupported = false;
+			VkExtent2D fragmentDensityTexelSize{0, 0};
 
 			// MSAA sample counts. `maxUsableSampleCount` is the highest count the
 			// device supports for both colour and depth framebuffer attachments;
@@ -133,7 +143,8 @@ namespace spades {
 			~SDLVulkanDevice();
 
 		public:
-			SDLVulkanDevice(SDL_Window* window);
+			SDLVulkanDevice(SDL_Window* window, bool headless = false);
+			bool IsHeadless() const { return headless; }
 
 			/** The device extensions the renderer cannot do without: a device
 			 * lacking any of them is never picked. */
@@ -199,6 +210,15 @@ namespace spades {
 			bool HasFillModeNonSolid() const { return fillModeNonSolidSupported; }
 			bool HasWideLines() const { return wideLinesSupported; }
 			bool HasGeometryShader() const { return geometryShaderSupported; }
+			/** VK_KHR_multiview: one render pass drawing both eyes. */
+			bool HasMultiview() const { return multiviewSupported; }
+			/** VK_EXT_fragment_density_map, with non-subsampled attachments: a
+			 * render pass shading parts of its targets at lower density
+			 * (vr_foveation). */
+			bool HasFragmentDensityMap() const { return fragmentDensityMapSupported; }
+			/** The area of the targets one texel of a density map is made to cover:
+			 * the device's smallest */
+			VkExtent2D GetFragmentDensityTexelSize() const { return fragmentDensityTexelSize; }
 
 			// MSAA sample count selected for the offscreen scene attachments
 			// (VK_SAMPLE_COUNT_1_BIT when MSAA is off). Scene render passes,

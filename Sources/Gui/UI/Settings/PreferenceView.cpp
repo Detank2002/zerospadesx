@@ -104,6 +104,7 @@ namespace spades {
 			Handle<HeadingNavIndex> hudNav = Handle<HeadingNavIndex>::New();
 			Handle<HeadingNavIndex> rendererNav = Handle<HeadingNavIndex>::New();
 			Handle<HeadingNavIndex> controlsNav = Handle<HeadingNavIndex>::New();
+			Handle<HeadingNavIndex> vrNav = Handle<HeadingNavIndex>::New();
 			Handle<HeadingNavIndex> miscNav = Handle<HeadingNavIndex>::New();
 
 			AddTab(Handle<GameOptionsPanel>::New(manager, options, fontManager,
@@ -125,6 +126,10 @@ namespace spades {
 			                                        controlsNav.GetPointerOrNull())
 			           .GetPointerOrNull(),
 			       _Tr("Preferences", "Controls"), controlsNav.GetPointerOrNull());
+			AddTab(Handle<VROptionsPanel>::New(manager, options, fontManager,
+			                                   vrNav.GetPointerOrNull())
+			           .GetPointerOrNull(),
+			       _Tr("Preferences", "VR"), vrNav.GetPointerOrNull());
 			AddTab(Handle<MiscOptionsPanel>::New(manager, options, fontManager,
 			                                     miscNav.GetPointerOrNull())
 			           .GetPointerOrNull(),

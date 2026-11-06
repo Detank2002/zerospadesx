@@ -114,7 +114,9 @@ namespace spades {
 					uint32_t set = compiler.get_decoration(ubo.id, spv::DecorationDescriptorSet);
 
 					if (set != 0) {
-						if (!IsExternalSet(set))
+						// The multiview set (VulkanRenderer's per-eye ZsViews) is
+						// appended by CreatePipelineLayout, not reflected.
+						if (!IsExternalSet(set) && ubo.name != "ZsViews")
 							SPLog("Warning: Shader '%s' uses descriptor set %d, which no owner gave",
 							      name.c_str(), set);
 						continue;
@@ -270,6 +272,13 @@ namespace spades {
 			       externalSetLayouts[set - 1] != VK_NULL_HANDLE;
 		}
 
+		namespace {
+			VkDescriptorSetLayout g_extraSetLayout = VK_NULL_HANDLE;
+		}
+		void VulkanProgram::SetExtraSetLayout(VkDescriptorSetLayout layout) {
+			g_extraSetLayout = layout;
+		}
+
 		void VulkanProgram::CreatePipelineLayout() {
 			// The program's own set, then the ones given to it
 			std::vector<VkDescriptorSetLayout> setLayouts{descriptorSetLayout};
@@ -279,6 +288,10 @@ namespace spades {
 					        i + 1);
 				setLayouts.push_back(externalSetLayouts[i]);
 			}
+
+			// And the multiview set, last, when the renderer draws both eyes at once
+			if (g_extraSetLayout != VK_NULL_HANDLE)
+				setLayouts.push_back(g_extraSetLayout);
 
 			VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 			pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

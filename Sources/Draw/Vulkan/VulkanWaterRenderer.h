@@ -75,8 +75,11 @@ namespace spades {
 			              "push constants must fit the 128 bytes every device has (VulkanPushConstants.h)");
 
 		public:
+
 			VulkanWaterRenderer(VulkanRenderer& r, client::GameMap* map);
 			~VulkanWaterRenderer();
+			/** Drawn inside the scene's pass, reading no copy of it (r_waterInScene) */
+			bool IsInScene() const { return inScene; }
 
 			static void PreloadShaders(VulkanRenderer&);
 
@@ -144,6 +147,7 @@ namespace spades {
 			// the build, then RenderSunlightPass gets past its own == 0 guard
 			// and dereferences the null vertexBuffer.
 			unsigned int numIndices = 0;
+			bool inScene = false;
 
 			// Water color texture (map colors)
 			Handle<VulkanImage> textureImage;

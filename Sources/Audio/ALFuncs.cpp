@@ -177,6 +177,13 @@ namespace al {
 	static spades::DynamicLibrary *alLibrary = NULL;
 
 	static void *GPA(const char *str) {
+		// OpenAL Soft built in (OPENAL_SOFT) has every function, extensions
+		// included, behind alGetProcAddress: ask it before opening a driver by
+		// name, which on Android does not exist to be opened.
+		if (qalGetProcAddress) {
+			if (void *v = qalGetProcAddress(str))
+				return v;
+		}
 		if (!alLibrary) {
 			auto paths = spades::Split(s_alDriver, ";");
 			std::string errors;

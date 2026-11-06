@@ -53,6 +53,7 @@ DEFINE_SPADES_SETTING(cg_autoScreenshot, "0");
 DEFINE_SPADES_SETTING(cg_demoAutoRecord, "0");
 DEFINE_SPADES_SETTING(cg_demoMaxFiles, "10");
 DEFINE_SPADES_SETTING(cg_demoAutoPrune, "1");
+SPADES_SETTING(cg_damageIndicators);
 
 namespace spades {
 	extern std::string g_pendingMapName;
@@ -108,6 +109,7 @@ namespace spades {
 			limbo->SetSelectedWeapon(p.GetWeaponType());
 			inGameLimbo = false;
 			limboMenu->Close();
+			limboTeamChosen = true;
 		}
 
 		void Client::JoinedGame() {
@@ -148,12 +150,25 @@ namespace spades {
 
 			// display client version
 			std::string verStr = std::string(ZEROSPADES_VER_STR);
+			if (*VRClientTag())
+				verStr += std::string(" ") + VRClientTag();
 			std::string osInfo = VersionInfo::GetVersionInfo();
 			std::string archInfo = VersionInfo::GetAppArchitecture();
 			std::string s = _Tr("Client", "You are connected with {0} ({2}) on {1}", verStr, osInfo, archInfo);
 			s = ChatWindow::ColoredMessage(s, MsgColorSysInfo);
 			chatWindow->AddMessage(s);
 			scriptedUI->RecordChatLog(s, chatWindow->GetColor(MsgColorSysInfo));
+			SPLog("%s", s.c_str());
+
+			// A headset on a server without vr_presence plays by a monitor's
+			// rules (VR.md, "Fair play"): say so once, as the game starts, so a
+			// shot that leaves from the eye is not a surprise. Not yet, though:
+			// piqueserver sends its extension list only after the client answers
+			// its version request, two round trips after the handshake, which over
+			// the internet is after this point. Deciding here told players on a
+			// server running the script that it did not (UpdateVRPresenceNotice).
+			if (GetVRSystem() && net && !IsDemoMode())
+				vrPresenceCheckAt = time + 4.0F;
 
 			// start recording if auto-record is enabled
 			if (net && (int)cg_demoAutoRecord != 0) {
@@ -358,6 +373,7 @@ namespace spades {
 			// A mark or a ping outlives its owner otherwise, and the slot can be reused
 			// by whoever connects next.
 			teamplay->PlayerLeft(playerId);
+			playerOutfits.PlayerLeft(playerId);
 
 			// A menu aimed at this player would otherwise name whoever takes the slot
 			// next, so it closes without sending anything.
@@ -431,11 +447,27 @@ namespace spades {
 			// lasts until they come back. Without the flag it survives death and respawn,
 			// so a punishment mark need not be re-sent on every kill.
 			TeamplayPlayerSpawned(p.GetId());
+			// A player wearing their team's outfit puts on the one in force now.
+			playerOutfits.PlayerSpawned(p.GetId(), p.GetTeamId());
 
 			bool isArena = activeNet && activeNet->GetStatus() == NetClientStatusConnected &&
 			               activeNet->GetGameProperties()->isGameModeArena;
 			if (isArena || cg_corpseClearOnRespawn)
 				RemoveCorpseForPlayer(p.GetId());
+		}
+
+		void Client::ToggleLocalFlashlight() {
+			// Spectators and dead players can't switch the flashlight.
+			stmp::optional<Player&> p = world ? world->GetLocalPlayer() : stmp::optional<Player&>();
+			if (!p || p->IsSpectator() || !p->IsAlive() || !net)
+				return;
+			if (net->IsFlashlightSynchronized()) {
+				// The switch the server relays back lights it.
+				net->SendFlashlight(!p->IsFlashlightOn());
+			} else {
+				p->SetFlashlightOn(!p->IsFlashlightOn());
+				PlayerSwitchedFlashlight(*p);
+			}
 		}
 
 		void Client::PlayerSwitchedFlashlight(Player& p) {

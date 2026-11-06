@@ -133,6 +133,17 @@ namespace spades {
 
 			float respawnTime;
 
+			// VR, local player only: the tools act from the hand holding them rather
+			// than from the eye. The offset is from the eye, so it rides along with
+			// the physics between the frames that set it.
+			bool hasVRToolRay = false;
+			Vector3 vrToolOffset{0.0F, 0.0F, 0.0F};
+			Vector3 vrToolDirection{1.0F, 0.0F, 0.0F};
+			// VR: the next grenade leaves with the hand's velocity instead of along
+			// the facing.
+			bool hasVRThrowVelocity = false;
+			Vector3 vrThrowVelocity{0.0F, 0.0F, 0.0F};
+
 			void MoveCorpse(float fsynctics);
 			void MovePlayer(float fsynctics);
 			void BoxClipMove(float fsynctics);
@@ -273,6 +284,28 @@ namespace spades {
 			 * @param dir normalized direction vector.
 			 * @return true if ray may hit the player. */
 			bool RayCastApprox(Vector3 start, Vector3 dir, float tolerance = 3.0F);
+
+			/** Where the held tool acts from, and which way: the hand in VR, the eye
+			 * and facing otherwise. */
+			Vector3 GetToolOrigin() { return hasVRToolRay ? eye + vrToolOffset : eye; }
+			Vector3 GetToolDirection() { return hasVRToolRay ? vrToolDirection : GetFront(); }
+			void SetVRToolRay(const Vector3& offsetFromEye, const Vector3& direction) {
+				hasVRToolRay = true;
+				vrToolOffset = offsetFromEye;
+				vrToolDirection = direction;
+			}
+			void ClearVRToolRay() { hasVRToolRay = false; }
+			bool HasVRToolRay() const { return hasVRToolRay; }
+			void SetVRThrowVelocity(const Vector3& v) {
+				hasVRThrowVelocity = true;
+				vrThrowVelocity = v;
+			}
+			void ClearVRThrowVelocity() { hasVRThrowVelocity = false; }
+
+			/** Room-scale: moves the body sideways by `delta` as far as the map
+			 * allows, per axis like BoxClipMove, never up or down.
+			 * @return how far it actually moved */
+			Vector3 VRPushBody(const Vector3& delta);
 
 			AABB3 GetBox();
 			bool OverlapsWith(const AABB3&);

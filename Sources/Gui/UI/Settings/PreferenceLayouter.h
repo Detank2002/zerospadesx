@@ -128,6 +128,12 @@ namespace spades {
 			                             const std::vector<std::string>& labels,
 			                             const std::vector<float>& xs, const std::vector<float>& ys,
 			                             const std::vector<float>& zs, bool enabled = true);
+			/** A button for each level (`labels`, translated, in order) and a last
+			 * one, `customLabel`, lit while the settings match none. */
+			void AddQualityPresetField(const std::string& caption,
+			                           const std::vector<QualityPreset>& presets,
+			                           const std::vector<std::string>& labels,
+			                           const std::string& customLabel, bool enabled = true);
 			void AddToggleField(const std::string& caption, const std::string& configName,
 			                    bool enabled = true);
 			void AddPlusMinusField(const std::string& caption, const std::string& configName,

@@ -15,6 +15,11 @@
 #include <kiss_fft130/kiss_fft.h>
 #include <cmath>
 
+// Level 1 water (r_water 1) drawn inside the scene's own pass, opaque, instead of
+// in a second pass over a copy of the scene (WaterInPass.vk.fs). On a tiled GPU
+// (a standalone headset) that copy and the reload after it were the costliest
+// part of the frame; the headset's mobile settings turn this on. Read with the map.
+DEFINE_SPADES_SETTING(r_waterInScene, "0");
 
 namespace spades {
 	namespace draw {
@@ -396,10 +401,11 @@ namespace spades {
 	: renderer(r), device(r.GetDevice()), gameMap(map), waterProgram(nullptr),
 	  descriptorPool(VK_NULL_HANDLE), waveStagingBufferSize(0) {
 			SPADES_MARK_FUNCTION();
+			inScene = (int)r.GetSettings().r_water == 1 && (int)r_waterInScene != 0;
 			SPLog("VulkanWaterRenderer created");
 
 			{
-				const uint32_t slots = device->GetMaxFramesInFlight();
+				const uint32_t slots = static_cast<uint32_t>(renderer.GetFrameSlotCount());
 				VkQueryPoolCreateInfo queryInfo{};
 				queryInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 				queryInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
@@ -558,7 +564,7 @@ namespace spades {
 			// flight, as a frame rewrites its own while the GPU may still be
 			// copying from the previous frame's
 			waveStagingBufferSize = size * size * sizeof(uint32_t);
-			const size_t stagingCount = numLayers * device->GetMaxFramesInFlight();
+			const size_t stagingCount = numLayers * renderer.GetFrameSlotCount();
 			for (size_t i = 0; i < stagingCount; i++) {
 				waveStagingBufferPool.push_back(Handle<VulkanBuffer>::New(
 					device, waveStagingBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -573,6 +579,8 @@ namespace spades {
 			r.RegisterProgram("Shaders/Vulkan/Water3.vk.program");
 		else if ((int)r.GetSettings().r_water >= 2)
 			r.RegisterProgram("Shaders/Vulkan/Water2.vk.program");
+		else if ((int)r_waterInScene)
+			r.RegisterProgram("Shaders/Vulkan/WaterInPass.vk.program");
 		else
 			r.RegisterProgram("Shaders/Vulkan/Water.vk.program");
 		}
@@ -688,6 +696,8 @@ namespace spades {
 			name = "Shaders/Vulkan/Water3.vk.program";
 		else if ((int)renderer.GetSettings().r_water >= 2)
 			name = "Shaders/Vulkan/Water2.vk.program";
+		else if (inScene)
+			name = "Shaders/Vulkan/WaterInPass.vk.program";
 		else
 			name = "Shaders/Vulkan/Water.vk.program";
 
@@ -782,11 +792,11 @@ namespace spades {
 
 		// Get screen copy images for refraction (copy of main scene, not the render
 		// target). Under MSAA these are the single-sample resolves; identical to the
-		// screen-copy images at 1x.
+		// screen-copy images at 1x. In the scene's pass the water reads neither.
 		Handle<VulkanImage> screenImage = fbManager->GetWaterRefractionColorImage();
 		Handle<VulkanImage> depthImage = fbManager->GetWaterRefractionDepthImage();
 
-		if (!screenImage || !depthImage) {
+		if (!inScene && (!screenImage || !depthImage)) {
 			SPLog("Warning: Screen copy textures not available");
 			return;
 		}
@@ -798,6 +808,7 @@ namespace spades {
 		imageInfos.reserve(4);
 
 		// Binding 0: screenTexture (from framebuffer) - dynamic
+		if (!inScene) {
 		imageInfos.push_back({});
 		imageInfos.back().imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		imageInfos.back().imageView = screenImage->GetImageView();
@@ -828,6 +839,7 @@ namespace spades {
 		depthTextureWrite.descriptorCount = 1;
 		depthTextureWrite.pImageInfo = &imageInfos.back();
 		descriptorWrites.push_back(depthTextureWrite);
+		}
 
 		// Bindings 2, 3/8, 5 are pre-bound (static) - no update needed
 
@@ -912,6 +924,9 @@ namespace spades {
 		  renderer.GetSceneLights().GetDescriptorSet(renderer.GetCurrentFrameIndex());
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
 		                        waterProgram->GetPipelineLayout(), 2, 1, &lightSet, 0, nullptr);
+		// Multiview: the eyes' views, set 1 (before the lights; the *sceneLights*
+		// directive's)
+		renderer.BindViewSet(commandBuffer, waterProgram->GetPipelineLayout(), 1);
 
 		// Push constants for per-frame water data (replaces WaterUBO)
 		vkCmdPushConstants(commandBuffer, waterProgram->GetPipelineLayout(),
@@ -1371,13 +1386,16 @@ void VulkanWaterRenderer::UpdateUniformBuffers(uint32_t frameIndex) {
 		waterPushConstants.fogColor = MakeVector4(fogCol.x, fogCol.y, fogCol.z, 0.0f);
 		waterPushConstants.skyColor = MakeVector4(skyCol.x, skyCol.y, skyCol.z, 0.0f);
 		waterPushConstants.zNearFar = MakeVector2(sceneDef.zNear, sceneDef.zFar);
+		// The time of day: the sun's light and the sky's, scaled in the shaders.
+		waterPushConstants._pad0 = MakeVector2(renderer.GetSunlight(), renderer.GetDaylight());
 
-		waterPushConstants.fovTan = MakeVector4(
-			tanf(sceneDef.fovX * 0.5f),
-			-tanf(sceneDef.fovY * 0.5f),
-			-tanf(sceneDef.fovX * 0.5f),
-			tanf(sceneDef.fovY * 0.5f)
-		);
+		// (right, -up, left, -down): for a centred view the old
+		// (tan x, -tan y, -tan x, tan y). The shaders rebuild view positions as
+		// mix(zw, xy, uv), which is right for any view, and project with
+		// waterViewToNdc, which undoes it.
+		const client::FovTangents fovEdges = sceneDef.GetFovTangents();
+		waterPushConstants.fovTan =
+		  MakeVector4(fovEdges.right, -fovEdges.up, fovEdges.left, -fovEdges.down);
 
 		// Calculate water plane in view coordinates
 		Matrix4 waterModelView = viewMatrix * modelMatrix;
@@ -1386,7 +1404,8 @@ void VulkanWaterRenderer::UpdateUniformBuffers(uint32_t frameIndex) {
 		waterPushConstants.waterPlane = MakeVector4(planeNormal.x, planeNormal.y, planeNormal.z, planeD);
 
 		waterPushConstants.viewOriginVector = MakeVector4(sceneDef.viewOrigin.x, sceneDef.viewOrigin.y, sceneDef.viewOrigin.z, 0.0f);
-		waterPushConstants.displaceScale = MakeVector2(1.0f / tanf(sceneDef.fovX * 0.5f), 1.0f / tanf(sceneDef.fovY * 0.5f));
+		waterPushConstants.displaceScale =
+		  MakeVector2(2.0f / fovEdges.Width(), 2.0f / fovEdges.Height());
 
 		Vector3 sunDir = renderer.GetSunDirection();
 		waterPushConstants.sunDirection = MakeVector4(sunDir.x, sunDir.y, sunDir.z, 0.0f);

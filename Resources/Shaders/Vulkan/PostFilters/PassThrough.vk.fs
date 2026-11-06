@@ -19,12 +19,22 @@
  */
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
 
-layout(binding = 0) uniform sampler2D mainTexture;
+
+layout(binding = 0) uniform ZS_EYE_SAMPLER mainTexture;
 
 layout(location = 0) in  vec2 texCoord;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-	outColor = texture(mainTexture, texCoord);
+	outColor = ZS_EYE_TEX(mainTexture, texCoord);
 }

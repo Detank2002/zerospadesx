@@ -27,6 +27,7 @@
 #include "DaytimeWeather.h"
 #include "DemoNetClient.h"
 #include "Flashlight.h"
+#include "PlayerOutfit.h"
 #include "NetProtocol.h"
 #include "GameMap.h"
 #include "GameMapLoader.h"
@@ -173,6 +174,7 @@ namespace spades {
 				if (status == NetClientStatusConnecting) {
 					int type = reader.GetType();
 					if (type == PacketTypeMapStart) {
+						client->GetPlayerOutfits().MapStarted();
 						auto mapSize = reader.ReadInt();
 						expectedMapSize = mapSize;
 						receivedMapBytes = 0;
@@ -934,8 +936,31 @@ namespace spades {
 						default: break; // a sub packet from a newer extension version
 					}
 				} break;
+				case PacketTypeVRPresence: {
+					// VR players' heads and hands replay like any other motion. Poses
+					// are momentary, so a seek skips them; the first one after it
+					// puts the hands back.
+					if (seekingMode || r.GetNumRemainingBytes() < 2 + kVRPosePayloadBytes)
+						break;
+					if (r.ReadByte() != VRSubPose)
+						break;
+					int pId = r.ReadByte();
+					char payload[kVRPosePayloadBytes];
+					for (std::size_t i = 0; i < kVRPosePayloadBytes; i++)
+						payload[i] = static_cast<char>(r.ReadByte());
+					if (GetWorld() && pId < static_cast<int>(GetWorld()->GetNumPlayerSlots()) &&
+					    GetWorld()->GetPlayer(pId))
+						client->VRPoseReceived(pId, vrnet::DecodePose(payload));
+				} break;
 				case PacketTypeFlashlight:
 					ApplyFlashlightPacket(r, *client, flashlightBeams, seekingMode);
+					break;
+				case PacketTypePlayerOutfit:
+					// State, not an event: applied while seeking too.
+					ApplyPlayerOutfitPacket(r, client->GetPlayerOutfits());
+					break;
+				case PacketTypePieMenu:
+					// A menu is for a player at the keys; a demo has nobody to open it.
 					break;
 				default:
 					SPLog("Demo: dropped unknown packet %d", (int)r.GetType());

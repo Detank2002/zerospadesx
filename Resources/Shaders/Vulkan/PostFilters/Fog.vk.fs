@@ -47,6 +47,7 @@ layout(push_constant) uniform Params {
     vec4 viewAxisFront;  // xyz, w = sunlight: with none, no shafts and an even fog
     vec4 fovZNearFar;    // xy = fov (tan half-angle), z = zNear, w = zFar
     vec4 fogColorDist;   // xyz = fogColor (linear), w = fogDistance
+    vec4 fovEdges;       // view-ray tangents: x = left, y = right, z = top, w = bottom
 } pc;
 
 layout(location = 0) in  vec2 texCoord;

@@ -43,7 +43,7 @@ namespace spades {
 	namespace client {
 
 		ChatWindow::ChatWindow(Client* c, IFont* fnt, bool killfeed)
-		    : client(c), renderer(c->GetRenderer()), font(fnt), killfeed(killfeed) {
+		    : client(c), renderer(c->GetRenderer()), font(fnt), baseFont(fnt), killfeed(killfeed) {
 			firstY = 0.0F;
 			killImages.push_back(renderer.RegisterImage("Gfx/Killfeed/a-Rifle.png").GetPointerOrNull());
 			killImages.push_back(renderer.RegisterImage("Gfx/Killfeed/b-SMG.png").GetPointerOrNull());
@@ -65,12 +65,21 @@ namespace spades {
 
 		float ChatWindow::GetWidth() { return renderer.ScreenWidth() * 0.5F; }
 
-		float ChatWindow::GetHeight() {
-			float prop = killfeed ? (float)cg_killfeedHeight : (float)cg_chatHeight;
-			return renderer.ScreenHeight() * prop * 0.01F;
+		float ChatWindow::LayoutHeight() {
+			return layoutHeight > 0.0F ? layoutHeight : renderer.ScreenHeight();
 		}
 
-		float ChatWindow::GetLineHeight() { return 20.0F; }
+		float ChatWindow::GetHeight() {
+			float prop = killfeed ? (float)cg_killfeedHeight : (float)cg_chatHeight;
+			return LayoutHeight() * prop * 0.01F;
+		}
+
+		float ChatWindow::GetLineHeight() { return 20.0F * textScale; }
+
+		void ChatWindow::SetTextScale(IFont* scaledFont, float scale) {
+			font = scaledFont ? scaledFont : baseFont;
+			textScale = scaledFont ? scale : 1.0F;
+		}
 
 		std::string ChatWindow::KillImage(int kt, int weapon) {
 			std::string tmp = "xx";
@@ -223,10 +232,11 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 
 			float sh = renderer.ScreenHeight();
+			layoutHeight = sh;
 
 			float winH = GetHeight();
 			float winX = 8.0F;
-			float winY = killfeed ? 8.0F : (sh - 64.0F) - winH;
+			float winY = killfeed ? 8.0F : (sh - bottomMargin) - winH;
 			float lh = GetLineHeight();
 			float y = killfeed ? firstY : winH - firstY;
 
@@ -243,6 +253,12 @@ namespace spades {
 			std::string ch = "aaaaaa"; // let's not make a new object for each character.
 			// note: UTF-8's longest character is 6 bytes
 
+			// Lines wrap, at a space where there is one, where they would run off
+			// what they are drawn on: the screen's edge on a monitor, the wrist
+			// panel's in a headset, which a long line used to run off. Each entry's
+			// height follows the lines it took, so the entries above it make room.
+			const float maxLineW = std::max(64.0F, renderer.ScreenWidth() - 8.0F - winX);
+
 			std::list<ChatEntry>::iterator it;
 			for (it = entries.begin(); it != entries.end(); ++it) {
 				ChatEntry& ent = *it;
@@ -256,6 +272,44 @@ namespace spades {
 				float curPosX = winX;
 				float tx = 0.0F, ty = entryY;
 				float fade = ent.fade;
+				// The width of the word starting at `from`: up to a space, a new
+				// line or a colour change (an image counts as part of the word).
+				auto wordWidth = [&](size_t from) {
+					float w = 0.0F;
+					for (size_t j = from; j < msg.size(); j++) {
+						const char c = msg[j];
+						if (c == ' ' || c == '\r' || c == '\n')
+							break;
+						if (c >= 1 && c <= MsgColorMax) {
+							if (c != MsgImage)
+								break;
+							IImage* img = j + 1 < msg.size() ? GetKillImage(msg[j + 1]) : nullptr;
+							if (img)
+								w += (int)roundf(img->GetWidth() * textScale);
+							j++;
+							continue;
+						}
+						size_t ln = 0;
+						GetCodePointFromUTF8String(msg, j, &ln);
+						w += (int)roundf(font->Measure(msg.substr(j, ln)).x);
+						j += ln - 1;
+					}
+					return w;
+				};
+				int lines = 1;
+				bool atWordStart = true;
+				// A new line for a word that does not fit, unless it is the line's
+				// first: a word wider than the whole line breaks where it reaches
+				// the edge instead.
+				auto wrapFor = [&](float w) {
+					if (tx > 0.0F && tx + w > maxLineW) {
+						tx = 0.0F;
+						ty += lh;
+						lines++;
+						return true;
+					}
+					return false;
+				};
 
 				float fadeOut = killfeed ? 0.5F : 1.0F;
 				if (ent.timeFade < fadeOut)
@@ -278,17 +332,24 @@ namespace spades {
 						// new line
 						tx = 0.0F;
 						ty += lh;
+						lines++;
+						atWordStart = true;
 					} else if (msg[i] >= 1 && msg[i] <= MsgColorMax) {
 						if (msg[i] == MsgImage) {
 							IImage* img = NULL;
 							if (i + 1 < msg.size() && (img = GetKillImage(msg[i + 1]))) {
+								if (atWordStart)
+									wrapFor(wordWidth(i));
+								atWordStart = false;
 								Vector4 colorP = color;
 								colorP.x *= colorP.w;
 								colorP.y *= colorP.w;
 								colorP.z *= colorP.w;
 								renderer.SetColorAlphaPremultiplied(colorP);
-								renderer.DrawImage(img, MakeVector2(tx + curPosX + 1, ty + winY).Floor());
-								tx += (int)roundf(img->GetWidth());
+								const Vector2 at = MakeVector2(tx + curPosX + 1, ty + winY).Floor();
+								renderer.DrawImage(img, AABB2(at.x, at.y, img->GetWidth() * textScale,
+								                              img->GetHeight() * textScale));
+								tx += (int)roundf(img->GetWidth() * textScale);
 								++i;
 							}
 						} else {
@@ -296,12 +357,23 @@ namespace spades {
 							color.w = fade;
 						}
 					} else {
+						if (msg[i] == ' ') {
+							atWordStart = true;
+						} else if (atWordStart) {
+							wrapFor(wordWidth(i));
+							atWordStart = false;
+						}
 						size_t ln = 0;
 						GetCodePointFromUTF8String(msg, i, &ln);
 						ch.resize(ln);
 						for (size_t k = 0; k < ln; k++)
 							ch[k] = msg[i + k];
 						i += ln - 1;
+						// A word longer than a whole line breaks at the edge.
+						wrapFor(roundf(font->Measure(ch).x));
+						// A space that wrapped is not drawn at the start of the line.
+						if (ch == " " && tx == 0.0F && ty > y)
+							continue;
 
 						float luminosity = color.x + color.y + color.z;
 						Vector4 shadow = (luminosity > 0.9F) ? shadowColor : brightShadowColor;
@@ -317,6 +389,8 @@ namespace spades {
 						tx += (int)roundf(font->Measure(ch).x);
 					}
 				}
+
+				ent.height = lh * (float)lines;
 
 			endDrawLine:
 				y = killfeed ? y + ent.height : entryY;

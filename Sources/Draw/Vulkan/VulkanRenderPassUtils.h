@@ -34,7 +34,10 @@ namespace spades {
 			VkAttachmentLoadOp loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
 			VkImageLayout initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 			VkImageLayout finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			const VkSubpassDependency* pDependency = nullptr
+			const VkSubpassDependency* pDependency = nullptr,
+			// Multiview: 0x3 draws both layers of a two-layer attachment (both
+			// eyes) in one pass. 0 is an ordinary pass.
+			uint32_t viewMask = 0
 		) {
 			VkAttachmentDescription colorAttachment = {};
 			colorAttachment.format = format;
@@ -129,6 +132,15 @@ namespace spades {
 
 			renderPassInfo.dependencyCount = 3;
 			renderPassInfo.pDependencies = deps;
+
+			VkRenderPassMultiviewCreateInfo multiview = {};
+			multiview.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
+			multiview.subpassCount = 1;
+			multiview.pViewMasks = &viewMask;
+			multiview.correlationMaskCount = 1;
+			multiview.pCorrelationMasks = &viewMask;
+			if (viewMask != 0)
+				renderPassInfo.pNext = &multiview;
 
 			VkRenderPass renderPass;
 			if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {

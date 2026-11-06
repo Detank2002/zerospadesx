@@ -38,8 +38,17 @@
 // path uses in BasicImage.frag, for the same reason.
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
 
-layout(binding = 0) uniform sampler2D sceneTexture;
+layout(binding = 0) uniform ZS_EYE_SAMPLER sceneTexture;
 layout(binding = 1) uniform sampler2D gainTexture;
 
 vec3 srgbToLinear(vec3 c) {
@@ -57,7 +66,7 @@ layout(location = 0) in  vec2 texCoord;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-	vec3 color = texture(sceneTexture, texCoord).rgb;
+	vec3 color = ZS_EYE_TEX(sceneTexture, texCoord).rgb;
 	float gain = texture(gainTexture, vec2(0.5, 0.5)).r;
 	color = max(color * gain, 0.0);
 

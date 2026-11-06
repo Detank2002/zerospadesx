@@ -52,6 +52,10 @@ namespace spades {
 			virtual ~VulkanPostProcessFilter();
 
 			virtual void Filter(VkCommandBuffer commandBuffer, VulkanImage* input, VulkanImage* output) = 0;
+			/** Multiview: the filter takes a two-layer input and output (both
+			 * eyes) and draws both in one pass. The chain runs the others once
+			 * per eye on copies of each eye's layer (VulkanRenderer::RecordPostChain). */
+			virtual bool SupportsLayers() const { return false; }
 		};
 	}
 }

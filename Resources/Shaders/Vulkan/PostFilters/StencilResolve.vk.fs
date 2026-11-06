@@ -30,8 +30,16 @@
 
 layout(location = 0) out uint fragStencil;
 
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+layout(set = 0, binding = 0) uniform usampler2DMSArray stencilMS;
+#define STENCIL_AT(p) texelFetch(stencilMS, ivec3((p), gl_ViewIndex), 0)
+#else
 layout(set = 0, binding = 0) uniform usampler2DMS stencilMS;
+#define STENCIL_AT(p) texelFetch(stencilMS, (p), 0)
+#endif
 
 void main() {
-    fragStencil = texelFetch(stencilMS, ivec2(gl_FragCoord.xy), 0).r;
+    fragStencil = STENCIL_AT(ivec2(gl_FragCoord.xy)).r;
 }

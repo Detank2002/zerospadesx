@@ -250,7 +250,7 @@ namespace spades {
 				return;
 
 			Handle<VulkanImage> depth = renderer.GetFramebufferManager()->GetResolvedDepthImage();
-			if (!depth)
+			if (!depth || renderer.GetFramebufferManager()->ResolvesInPass())
 				return;
 
 			const client::SceneDefinition& def = renderer.GetSceneDef();

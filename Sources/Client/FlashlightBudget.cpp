@@ -24,6 +24,17 @@
 #include "FlashlightBudget.h"
 #include "GameMap.h"
 #include <Core/Debug.h>
+#include <Core/Settings.h>
+
+// The most flashlights lit as spotlights at once; the rest show as a glow where
+// they land. Each spotlight traces its shadows through the map every frame: a
+// standalone headset's GPU afforded one (testers: a frame rate drop with the
+// flashlight on), a PC the sixteen.
+#if defined(__ANDROID__)
+DEFINE_SPADES_SETTING(cg_flashlightBeams, "1");
+#else
+DEFINE_SPADES_SETTING(cg_flashlightBeams, "16");
+#endif
 
 namespace spades {
 	namespace client {
@@ -60,6 +71,10 @@ namespace spades {
 			}
 		} // namespace
 
+		std::size_t FlashlightBudget::MaxLitBeams() {
+			return static_cast<std::size_t>(std::max(1, std::min(16, (int)cg_flashlightBeams)));
+		}
+
 		void FlashlightBudget::Submit(IRenderer& renderer, const GameMap& map,
 		                              const SceneDefinition& view) {
 			SPADES_MARK_FUNCTION();
@@ -87,7 +102,7 @@ namespace spades {
 
 			for (std::size_t k = 0; k < order.size(); k++) {
 				const Beam& beam = beams[order[k]];
-				if (k < MaxLitBeams)
+				if (k < MaxLitBeams())
 					renderer.AddLight(beam.light);
 				else
 					AddGlow(renderer, map, beam);

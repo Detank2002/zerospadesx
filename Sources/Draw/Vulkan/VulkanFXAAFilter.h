@@ -47,8 +47,11 @@ namespace spades {
 
 			VkPipelineLayout fxaaLayout;
 			VkPipeline fxaaPipeline;
+			// Multiview twins (both eyes in one pass), made only in multiview.
+			VkRenderPass ppRenderPassMV = VK_NULL_HANDLE;
+			VkPipeline fxaaPipelineMV = VK_NULL_HANDLE;
 
-			static constexpr int MAX_FRAME_SLOTS = MaxFramesInFlight;
+			static constexpr int MAX_FRAME_SLOTS = MaxFrameSlots;
 			VkDescriptorPool perFrameDescPool[MAX_FRAME_SLOTS];
 			std::vector<VkFramebuffer> perFrameFramebuffers[MAX_FRAME_SLOTS];
 
@@ -59,7 +62,7 @@ namespace spades {
 
 			VkShaderModule LoadSPIRV(const char* path);
 
-			VkFramebuffer MakeFramebuffer(VulkanImage* image, int frameSlot);
+			VkFramebuffer MakeFramebuffer(VulkanImage* image, int frameSlot, VkRenderPass pass);
 			VkDescriptorSet BindTexture(int frameSlot, VkImageView view);
 
 			void CreatePipeline() override {}
@@ -71,6 +74,8 @@ namespace spades {
 
 			void Filter(VkCommandBuffer cmd,
 			            VulkanImage* input, VulkanImage* output) override;
+
+			bool SupportsLayers() const override { return fxaaPipelineMV != VK_NULL_HANDLE; }
 		};
 
 	} // namespace draw

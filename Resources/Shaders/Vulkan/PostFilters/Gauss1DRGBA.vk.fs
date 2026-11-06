@@ -25,8 +25,18 @@
 // Pair with PassThrough.vk.vs.
 
 #version 450
+#ifdef ZS_MULTIVIEW
+// Multiview: both eyes' layers in one pass; each fragment reads its own.
+#extension GL_EXT_multiview : require
+#define ZS_EYE_SAMPLER sampler2DArray
+#define ZS_EYE_TEX(t, uv) texture(t, vec3((uv), float(gl_ViewIndex)))
+#else
+#define ZS_EYE_SAMPLER sampler2D
+#define ZS_EYE_TEX(t, uv) texture(t, (uv))
+#endif
 
-layout(binding = 0) uniform sampler2D mainTexture;
+
+layout(binding = 0) uniform ZS_EYE_SAMPLER mainTexture;
 
 layout(push_constant) uniform Params {
     vec2 unitShift;
@@ -41,8 +51,8 @@ void main() {
     const float w1 = 0.178704407070903;
     const float w2 = 0.321295592929097;
 
-    outColor  = texture(mainTexture, texCoord - s1) * w1;
-    outColor += texture(mainTexture, texCoord - s2) * w2;
-    outColor += texture(mainTexture, texCoord + s2) * w2;
-    outColor += texture(mainTexture, texCoord + s1) * w1;
+    outColor  = ZS_EYE_TEX(mainTexture, texCoord - s1) * w1;
+    outColor += ZS_EYE_TEX(mainTexture, texCoord - s2) * w2;
+    outColor += ZS_EYE_TEX(mainTexture, texCoord + s2) * w2;
+    outColor += ZS_EYE_TEX(mainTexture, texCoord + s1) * w1;
 }

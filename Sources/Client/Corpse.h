@@ -27,6 +27,7 @@ namespace spades {
 		class IRenderer;
 		class GameMap;
 		class Player;
+		class PlayerOutfits;
 		class IModel;
 
 		class Corpse {
@@ -65,6 +66,11 @@ namespace spades {
 			int playerId;
 			Vector3 color;
 			std::string weaponName;
+			// The model set it was drawn with when it fell, and where to look its
+			// parts up (PlayerOutfit.h); none, the usual parts.
+			std::string modelSet;
+			const PlayerOutfits* models;
+			std::string ModelPart(const std::string& modelPath, const std::string& part) const;
 			bool isLocalPlayer;
 			bool isZombiePlayer;
 			bool isChristmasOn;
@@ -94,7 +100,8 @@ namespace spades {
 			 * @param p The player to create a corpse from. Can be destroyed
 			 *			after `Corpse` is constructed.
 			 */
-			Corpse(IRenderer& renderer, GameMap& map, Player& p, bool isChristmasOn);
+			Corpse(IRenderer& renderer, GameMap& map, Player& p, bool isChristmasOn,
+			       const PlayerOutfits* models = nullptr);
 			~Corpse();
 
 			void Update(float dt);

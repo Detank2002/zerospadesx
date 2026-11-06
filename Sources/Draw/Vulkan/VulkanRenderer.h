@@ -21,6 +21,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -62,6 +63,7 @@ namespace spades {
 		class VulkanProgram;
 		class VulkanShader;
 		class VulkanImage;
+		class VulkanImageWrapper;
 		class VulkanTemporaryImagePool;
 		class VulkanBuffer;
 		class VulkanAutoExposureFilter;
@@ -169,6 +171,20 @@ namespace spades {
 			std::unique_ptr<VulkanLongSpriteRenderer> longSpriteRenderer;
 			std::unique_ptr<VulkanGlareRenderer> glareRenderer;
 			std::unique_ptr<VulkanImageRenderer> imageRenderer;
+			// The VR wrist panel's 2D layer, made on first use. 2D calls go to it
+			// between SetVRCanvas(1) and SetVRCanvas(0).
+			std::unique_ptr<VulkanImageRenderer> wristImageRenderer;
+			int vrCanvas = 0;
+			bool wristCanvasUsed = false; // something was queued for it this frame
+			VulkanImageRenderer* Canvas2D() const {
+				if (vrCanvas == 1 && wristImageRenderer)
+					return wristImageRenderer.get();
+				if ((vrCanvas == 2 || vrCanvas == 3) && eyeImageRenderers[vrCanvas - 2])
+					return eyeImageRenderers[vrCanvas - 2].get();
+				if ((vrCanvas == 4 || vrCanvas == 5) && eyeComfortRenderers[vrCanvas - 4])
+					return eyeComfortRenderers[vrCanvas - 4].get();
+				return imageRenderer.get();
+			}
 			std::unique_ptr<VulkanWaterRenderer> waterRenderer;
 			std::unique_ptr<VulkanFlatMapRenderer> flatMapRenderer;
 			std::unique_ptr<VulkanShadowMapRenderer> shadowMapRenderer;
@@ -222,6 +238,173 @@ namespace spades {
 			int renderWidth;
 			int renderHeight;
 
+			// The 2D layer's size: the window, whatever the 3D is drawn at. In VR the
+			// 3D is drawn at the headset's eye size while the UI keeps the window's
+			// layout on the HUD panel, so the two stop being the same number.
+			int uiWidth;
+			int uiHeight;
+			// With a headset the 2D layer has a layout of its own (vr_uiWidth, 16:9)
+			// for the whole run, whatever the window, and headset panels are
+			// drawn at uiPixelRatio times it and filtered down: the window no
+			// longer decides how big or how sharp the text is in the headset.
+			bool vrUILayout = false;
+			int uiPixelRatio = 1;
+			void SetupVRUILayout();
+
+			// --- VR -----------------------------------------------------------
+			// A headset frame draws each eye as a frame of its own: its own
+			// command buffer, fence and frame slot. The post filters, the water and
+			// the sprite batches all recycle their per-frame resources by slot on
+			// every call, so two eyes recorded into one command buffer (or on one
+			// slot) would reset descriptors the other eye's commands still use.
+			// The 2D layer then goes into `hudImage` and on to the headset's HUD
+			// panel, and the left eye is mirrored to the window.
+			bool vrFrame = false;         // this frame belongs to the headset
+			bool vrEyesWanted = false;    // ...and StartScene was given eyes to draw
+			bool vrEyesRendered = false;  // both eyes went to the headset
+			int vrEyeIndex = -1;          // eye being recorded, -1 outside eye passes
+			bool keepSceneLists = false;  // see KeepsSceneLists
+			// The eyes' size while a headset draws, {0, 0} otherwise: what
+			// DesiredRenderExtent gives in place of the window's
+			VkExtent2D vrRenderExtent{0, 0};
+
+			// Multiview (vr_multiview): see IsMultiview.
+			bool multiview = false;
+			// Foveated rendering in a headset (vr_foveation), 0 for none: every
+			// scene target set (the eyes', the scope's) is made with it.
+			int foveation = 0;
+			VkDescriptorSetLayout viewSetLayout = VK_NULL_HANDLE;
+			VkDescriptorSetLayout emptySetLayout = VK_NULL_HANDLE;
+			VkDescriptorPool viewSetPool = VK_NULL_HANDLE;
+			static constexpr int kViewSetSlots = 3;
+			Handle<VulkanBuffer> viewSetBuffers[kViewSetSlots];
+			VkDescriptorSet viewSets[kViewSetSlots]{};
+			void CreateViewSets();
+			void DestroyViewSets();
+			/** Fill the current slot's per-eye data for the two eyes; the scene is
+			 * then drawn with eye 0's matrices and each vertex is moved into eye
+			 * `gl_ViewIndex` by `correction`. */
+			void WriteViewSet(const client::SceneDefinition& eye0, const client::SceneDefinition& eye1);
+			/** Multiview: the two eyes of the frame being recorded (the scene is
+			 * drawn from [0]; the post chain runs from each). */
+			client::SceneDefinition vrMultiviewEyes[2];
+			/** Widen the culling frustum (built for eye 0) to cover `other` too:
+			 * its right plane is the other eye's, the top and bottom the looser. */
+			void WidenFrustrumTo(const client::SceneDefinition& other);
+			/** One filter of the post chain, from `in` to `out` (false: it drew
+			 * nothing). `layers`: it can take both eyes' layers at once. */
+			struct PostStep {
+				bool layers;
+				std::function<bool(VkCommandBuffer, VulkanImage*, VulkanImage*)> run;
+			};
+			std::vector<PostStep> BuildPostSteps(bool eyePass);
+			/** Multiview: the chain for both eyes, ending in each eye's output. */
+			void RecordMultiviewPostChain(VkCommandBuffer cmd);
+			/** Multiview: make eye `eye` the one being recorded (its view, slot). */
+			void SetMultiviewEye(int eye);
+			/** Copy one layer of `src` into one layer of `dst`; both in
+			 * SHADER_READ_ONLY before and after (dst's layer may be undefined before). */
+			void CopyImageLayer(VkCommandBuffer cmd, VulkanImage* src, uint32_t srcLayer,
+			                    VulkanImage* dst, uint32_t dstLayer);
+			client::SceneDefinition vrHeadSceneDef;
+			// [2] is the scope view's (see SetVRScopeView).
+			VkCommandBuffer vrEyeCommandBuffers[3]{VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkFence vrEyeFences[3]{VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+			// The view being recorded is the last of the frame: it clears the
+			// scene lists the others keep.
+			bool vrViewLast = false;
+
+			// A rifle scope's view. Rendered after the eyes, square and small, in a
+			// framebuffer manager of its own (swapped in for the pass), slot 2;
+			// without water, whose renderer holds the eye-sized manager's images.
+			// Its picture is blitted to an sRGB image (the encode) and copied to a
+			// UNORM one, which the 2D layer samples and decodes like any texture.
+			bool vrScopeWanted = false;
+			bool vrScopePass = false;
+			bool vrScopeRendered = false;
+			client::SceneDefinition::VREye vrScopeView{};
+			std::unique_ptr<VulkanFramebufferManager> scopeFramebufferManager;
+			Handle<VulkanImage> scopeSrgbImage;
+			// vr_debugScope: the scope's picture read back, to log how bright it is
+			Handle<VulkanBuffer> scopeDebugReadback;
+			bool scopeDebugPending = false;
+			int scopeDebugFrames = 0;
+			Handle<VulkanImage> scopeImage;
+			Handle<VulkanImageWrapper> scopeImageWrapper;
+			void EnsureScopeTargets(int size);
+			// Each eye's finished picture, kept until Flip. What the client pins to
+			// places in the world (names, pings, damage numbers) is drawn over it
+			// there, per eye and so at its own depth, because the 2D layer is drawn
+			// after the scene; only then does it go to the headset. The left one is
+			// also the window's mirror.
+			Handle<VulkanImage> vrEyeImages[2];
+			VkFramebuffer vrEyeFramebuffers[2]{VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkRenderPass eyeOverlayRenderPass = VK_NULL_HANDLE;
+			std::unique_ptr<VulkanImageRenderer> eyeImageRenderers[2];
+			bool eyeCanvasUsed[2] = {false, false};
+			// What only the headset shows, over each eye after the window's
+			// preview was taken (SetVRCanvas 4 and 5)
+			std::unique_ptr<VulkanImageRenderer> eyeComfortRenderers[2];
+			bool eyeComfortUsed[2] = {false, false};
+			// The window's preview: the mirrored eye with its labels, without
+			// the comfort layer, and with the wrist panel drawn where that eye
+			// sees it (the runtime adds the panels to the headset's own view)
+			Handle<VulkanImage> vrMirrorImage;
+			VkFramebuffer vrMirrorFramebuffer = VK_NULL_HANDLE;
+			std::unique_ptr<VulkanImageRenderer> mirrorImageRenderer;
+			void EnsureVRMirrorImage(uint32_t width, uint32_t height);
+			/** Copies `eye` (TRANSFER_SRC) into the preview and draws the wrist
+			 * panel over it when `wristDrawn`; the preview is left TRANSFER_SRC. */
+			void RecordVRMirror(VkCommandBuffer cmd, uint32_t frameIndex, VulkanImage& eye, int eyeIndex,
+			                    bool wristDrawn);
+			void EnsureVREyeImage(int eye, uint32_t width, uint32_t height);
+
+			// Holding the headset's frame rate (vr_dynamicResolution). The eyes are
+			// drawn at a fraction of their full size, stepped by how long the GPU
+			// takes over them. Timed with timestamps around each command buffer's
+			// own work and added up: one span per eye drawn one at a time, one for
+			// both in multiview. Not from the left eye's start to the right eye's
+			// end, which counts the GPU waiting while the CPU records the right eye.
+			// Two sets, alternating, so a set is read two frames after it was
+			// written, when it is done; a set is 2 spans of 2 timestamps.
+			VkQueryPool vrTimestampPool = VK_NULL_HANDLE;
+			bool vrTimestampsOk = false;
+			float vrTimestampPeriodNs = 0.0F;
+			uint64_t vrTimestampMask = ~0ull;
+			int vrTimestampSet = 0;
+			// Per set, a bit for each span opened (low two bits) and closed (next two).
+			uint32_t vrTimestampSpans[2] = {0, 0};
+			int vrTimestampOpen = -1; // the span the recording command buffer opened
+			float vrGpuMs = 0.0F;
+			float vrOverTime = 0.0F, vrUnderTime = 0.0F, vrHoldTime = 0.0F;
+			int vrResolutionLevel = 0; // 0: full size
+			float VRResolutionScale() const;
+			void RecordVRTimestamp(VkCommandBuffer cmd, bool start);
+			void UpdateVRResolution(float budgetMs, float dt);
+			/** The 2D layout of an eye's overlay: half the eye's pixels, drawn at
+			 * 2x, so text there is the size and sharpness of the panels'. */
+			VkExtent2D EyeCanvasLayout(int eye) const;
+			void DiscardEyeOverlays();
+			Handle<VulkanImage> hudImage;
+			VkRenderPass hudRenderPass = VK_NULL_HANDLE;
+			VkFramebuffer hudFramebuffer = VK_NULL_HANDLE;
+			Handle<VulkanImage> wristImage;
+			VkFramebuffer wristFramebuffer = VK_NULL_HANDLE;
+
+			bool IsHeadsetFrame() const;
+			void EnsureWristTarget();
+			/** Draws the wrist canvas and copies it to the headset; false if the
+			 * panel is not up this frame. */
+			bool RecordWristPanel(VkCommandBuffer cmd, uint32_t frameIndex);
+			void EnsureVRResources();
+			void DestroyVRResources();
+			void EnsureHudTarget();
+			/** Resizes the 3D targets; waits for the GPU, so only on a real change. */
+			void EnsureRenderSize(int width, int height);
+			void RenderVREyes();
+			void RecordVREyeOutput(VkCommandBuffer commandBuffer, VulkanImage* finalImage);
+			void FlipVRFrame();
+
 			void BuildProjectionMatrix();
 			void BuildView();
 			void BuildFrustrum();
@@ -263,6 +446,9 @@ namespace spades {
 			 * depth of everything opaque before anything is lit */
 			bool UsesDepthPrepass() const;
 			bool UsesFullDepthPrepass() const;
+			/** The scene pass resolves its colour itself and stores no depth
+			 * (r_resolveInPass, where nothing reads the depth after the pass). */
+			bool SceneResolvesInPass();
 
 			/** Makes the screen-space ambient occlusion for the render targets, if
 			 * `r_ssao` asks for it, and points the scene views at it: with the
@@ -292,6 +478,13 @@ namespace spades {
 			                                    VkMemoryPropertyFlags fallback);
 
 			void RecordCommandBuffer(uint32_t imageIndex);
+			/** The post-process chain on the resolved scene; returns the final image
+			 * (in SHADER_READ_ONLY). The two scratch images are handed back so they
+			 * live until the commands that use them are recorded. */
+			VulkanImage* RecordPostChain(VkCommandBuffer commandBuffer,
+			                             Handle<VulkanImage> offscreenColor, bool eyePass,
+			                             Handle<VulkanImage>& ppTempImage,
+			                             Handle<VulkanImage>& ppTempImage2);
 			void Record2DCommandBuffer(uint32_t imageIndex);
 
 			// Sky gradient rendering
@@ -355,6 +548,7 @@ namespace spades {
 
 			Handle<client::IImage> RegisterImage(const char* filename) override;
 			Handle<client::IModel> RegisterModel(const char* filename) override;
+			void ReloadResources(const ResourceChanges&) override;
 
 			Handle<client::IImage> CreateImage(Bitmap& bitmap) override;
 			Handle<client::IModel> CreateModel(VoxelModel& model) override;
@@ -427,6 +621,21 @@ namespace spades {
 			/** The settings latched for the renderer's life (`VulkanSettings`) */
 			VulkanSettings& GetSettings() { return settings; }
 			int GetRenderHeight() const { return renderHeight; }
+			/** The surface the 2D layer is being drawn onto right now. */
+			VkExtent2D GetUIExtent() const;
+			/** Headset eye pass being recorded, or -1. */
+			int GetVREyeIndex() const { return vrEyeIndex; }
+			/** Whether the scene's queued models, sprites and lights are kept after
+			 * the pass being recorded: a headset's eye passes but the last draw the
+			 * same lists. */
+			bool KeepsSceneLists() const { return keepSceneLists; }
+			/** The frame slots per-frame resources are kept for (GetCurrentFrameIndex):
+			 * a frame in flight's each, and a headset's eye and scope passes'
+			 * (VulkanFramesInFlight.h). */
+			std::size_t GetFrameSlotCount() const;
+			/** The peak the lit map and models roll off toward (vr_brightness), the
+			 * VOXEL_PEAK of their shaders; 0 outside a headset run. */
+			float GetVRVoxelPeak() const;
 
 			void StartScene(const client::SceneDefinition& def) override;
 
@@ -474,6 +683,12 @@ namespace spades {
 
 			float ScreenWidth() override;
 			float ScreenHeight() override;
+			bool SetVRCanvas(int canvas) override;
+			float GetUIPixelRatio() override;
+			bool GetVRFrameStats(float& gpuMilliseconds, float& resolutionScale) override;
+			void SetVRScopeView(const Vector3& origin, const Vector3& right, const Vector3& up,
+			                    const Vector3& forward, float fov) override;
+			client::IImage* GetVRScopeImage() override;
 
 			client::RendererInfo GetRendererInfo() override;
 
@@ -499,6 +714,35 @@ namespace spades {
 			VkRenderPass GetRenderPass() const { return renderPass; } // Swapchain render pass (for UI)
 			VkRenderPass GetOffscreenRenderPass() const; // Offscreen render pass (for 3D)
 			uint32_t GetCurrentFrameIndex() const { return currentFrameSlot; }
+
+			/** vr_multiview: both eyes drawn in one pass. Fixed for the renderer's
+			 * life (every pipeline is built for it). */
+			bool IsMultiview() const { return multiview; }
+			/** Multiview: eye `i`'s view this frame (valid while it is recorded). */
+			const client::SceneDefinition& GetMultiviewEye(int i) const { return vrMultiviewEyes[i]; }
+			/** The eyes' views as a set of their own (ZsViews in the .mv shaders),
+			 * where a pipeline has a set free for it: the sky's and the lines' 0,
+			 * the water's 1 (see WriteViewSet). Null without multiview. */
+			VkDescriptorSetLayout GetViewSetLayout() const { return viewSetLayout; }
+			/** Multiview: bind the current frame slot's per-eye set at `setIndex`.
+			 * Call after binding a pipeline whose layout appends GetViewSetLayout().
+			 * Does nothing otherwise. */
+			void BindViewSet(VkCommandBuffer cmd, VkPipelineLayout layout, uint32_t setIndex);
+			/** Appends the view set layout to `layouts` in multiview; returns the
+			 * index it went in at (or the count, unused, otherwise). */
+			uint32_t AppendViewSetLayout(std::vector<VkDescriptorSetLayout>& layouts) const;
+			/** Multiview: frame slot `slot`'s eye views (ZsViews), for the sets
+			 * that carry them as a binding (the scene view's, the sprites'); null
+			 * without multiview. */
+			VulkanBuffer* GetViewSetBuffer(std::size_t slot) const {
+				return multiview ? viewSetBuffers[std::min<std::size_t>(slot, kViewSetSlots - 1)]
+				                     .GetPointerOrNull()
+				                 : nullptr;
+			}
+
+			/** A set layout with nothing in it: pads a pipeline layout whose optional
+			 * set is absent, so the view set sits at the index its shader expects. */
+			VkDescriptorSetLayout GetEmptySetLayout() const { return emptySetLayout; }
 			// Monotonic frame counter (incremented each FrameDone). Lets per-frame
 			// resources distinguish multiple uses within one frame from frame-to-frame
 			// reuse of the same in-flight slot.

@@ -24,6 +24,7 @@
 #include <Gui/SDLVulkanDevice.h>
 #include <Core/Bitmap.h>
 #include <Core/Debug.h>
+#include <utility>
 
 namespace spades {
 	namespace draw {
@@ -35,6 +36,12 @@ namespace spades {
 
 		VulkanImageWrapper::~VulkanImageWrapper() {
 			SPADES_MARK_FUNCTION();
+		}
+
+		void VulkanImageWrapper::Replace(VulkanImageWrapper& other) {
+			std::swap(image, other.image);
+			std::swap(width, other.width);
+			std::swap(height, other.height);
 		}
 
 		void VulkanImageWrapper::Update(Bitmap& bmp, int x, int y) {

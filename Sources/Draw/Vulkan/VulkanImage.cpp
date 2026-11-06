@@ -29,7 +29,8 @@ namespace spades {
 
 		VulkanImage::VulkanImage(Handle<gui::SDLVulkanDevice> dev, uint32_t w, uint32_t h,
 		                         VkFormat fmt, VkImageTiling tiling, VkImageUsageFlags usage,
-		                         VkMemoryPropertyFlags properties, VkSampleCountFlagBits samp)
+		                         VkMemoryPropertyFlags properties, VkSampleCountFlagBits samp,
+		                         uint32_t layers)
 		: device(std::move(dev)),
 		  image(VK_NULL_HANDLE),
 		  allocation(VK_NULL_HANDLE),
@@ -39,7 +40,7 @@ namespace spades {
 		  sampler(VK_NULL_HANDLE),
 		  width(w),
 		  height(h),
-		  arrayLayers(1),
+		  arrayLayers(layers),
 		  mipLevels(1),
 		  format(fmt),
 		  samples(samp),
@@ -56,7 +57,7 @@ namespace spades {
 			imageInfo.extent.height = height;
 			imageInfo.extent.depth = 1;
 			imageInfo.mipLevels = 1;
-			imageInfo.arrayLayers = 1;
+			imageInfo.arrayLayers = arrayLayers;
 			imageInfo.format = format;
 			imageInfo.tiling = tiling;
 			imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -175,6 +176,9 @@ namespace spades {
 			if (attachmentView != VK_NULL_HANDLE) {
 				vkDestroyImageView(vkDevice, attachmentView, nullptr);
 			}
+			for (VkImageView v : layerViews)
+				if (v != VK_NULL_HANDLE)
+					vkDestroyImageView(vkDevice, v, nullptr);
 
 			if (stencilView != VK_NULL_HANDLE) {
 				vkDestroyImageView(vkDevice, stencilView, nullptr);
@@ -232,6 +236,24 @@ namespace spades {
 			if (result != VK_SUCCESS) {
 				SPRaise("Failed to create image view (error code: %d)", result);
 			}
+		}
+
+		VkImageView VulkanImage::GetLayerView(uint32_t layer) {
+			if (arrayLayers <= 1)
+				return imageView;
+			if (layerViews.size() < arrayLayers)
+				layerViews.resize(arrayLayers, VK_NULL_HANDLE);
+			if (layerViews[layer] == VK_NULL_HANDLE) {
+				VkImageViewCreateInfo vi{};
+				vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+				vi.image = image;
+				vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+				vi.format = format;
+				vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, layer, 1};
+				if (vkCreateImageView(device->GetDevice(), &vi, nullptr, &layerViews[layer]) != VK_SUCCESS)
+					SPRaise("Failed to create a layer view");
+			}
+			return layerViews[layer];
 		}
 
 		void VulkanImage::CreateAttachmentImageView() {

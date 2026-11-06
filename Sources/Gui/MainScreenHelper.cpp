@@ -30,6 +30,7 @@
 #include <curl/curl.h>
 #include <json/json.h>
 
+#include "CurlTls.h"
 #include "Main.h"
 #include "MainScreen.h"
 #include "MainScreenHelper.h"
@@ -164,6 +165,7 @@ namespace spades {
 				};
 				curl_easy_setopt(cHandle.get(), CURLOPT_USERAGENT, PACKAGE_STRING);
 				curl_easy_setopt(cHandle.get(), CURLOPT_URL, url);
+				SetupCurlTls(cHandle.get());
 				curl_easy_setopt(cHandle.get(), CURLOPT_WRITEFUNCTION, curlWriteCallback);
 				curl_easy_setopt(cHandle.get(), CURLOPT_WRITEDATA, this);
 				curl_easy_setopt(cHandle.get(), CURLOPT_LOW_SPEED_TIME, 30l);
@@ -543,6 +545,13 @@ namespace spades {
 		bool MainScreenHelper::ShouldOpenModsTab() { return spades::g_openModsTab; }
 		bool MainScreenHelper::IsTryingMod() { return spades::g_tryMod; }
 		void MainScreenHelper::RelaunchForMods() { spades::RelaunchForMods(); }
+
+		ModApplyResult MainScreenHelper::ApplyMods(std::string& error) {
+			if (mainScreen == NULL)
+				return ModApplyResult::NeedsRestart;
+			return ModOverlay::Apply(*mainScreen->GetRenderer(), *mainScreen->GetAudioDevice(),
+			                         error);
+		}
 
 		std::string MainScreenHelper::GetPendingErrorMessage() {
 			std::string s = errorMessage;

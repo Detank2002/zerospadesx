@@ -24,6 +24,21 @@
 
 namespace spades {
 	namespace draw {
+		namespace {
+			// Specifies the bound texture from `bmp`, with its mipmaps.
+			void Upload(IGLDevice& dev, Bitmap& bmp) {
+				dev.TexImage2D(IGLDevice::Texture2D, 0, IGLDevice::RGBA, bmp.GetWidth(),
+				               bmp.GetHeight(), 0, IGLDevice::RGBA, IGLDevice::UnsignedByte,
+				               bmp.GetPixels());
+				dev.TexParamater(IGLDevice::Texture2D, IGLDevice::TextureMagFilter, IGLDevice::Linear);
+				dev.TexParamater(IGLDevice::Texture2D, IGLDevice::TextureMinFilter,
+				                 IGLDevice::LinearMipmapNearest);
+				dev.TexParamater(IGLDevice::Texture2D, IGLDevice::TextureWrapS, IGLDevice::Repeat);
+				dev.TexParamater(IGLDevice::Texture2D, IGLDevice::TextureWrapT, IGLDevice::Repeat);
+				dev.GenerateMipmap(IGLDevice::Texture2D);
+			}
+		} // namespace
+
 		GLImage::GLImage(IGLDevice::UInteger texObj, IGLDevice* dev, float w, float h,
 		                 bool autoDelete)
 		    : device(dev),
@@ -56,15 +71,7 @@ namespace spades {
 
 			IGLDevice::UInteger tex = dev->GenTexture();
 			dev->BindTexture(IGLDevice::Texture2D, tex);
-			dev->TexImage2D(IGLDevice::Texture2D, 0, IGLDevice::RGBA, bmp.GetWidth(),
-			                bmp.GetHeight(), 0, IGLDevice::RGBA, IGLDevice::UnsignedByte,
-			                bmp.GetPixels());
-			dev->TexParamater(IGLDevice::Texture2D, IGLDevice::TextureMagFilter, IGLDevice::Linear);
-			dev->TexParamater(IGLDevice::Texture2D, IGLDevice::TextureMinFilter,
-			                  IGLDevice::LinearMipmapNearest);
-			dev->TexParamater(IGLDevice::Texture2D, IGLDevice::TextureWrapS, IGLDevice::Repeat);
-			dev->TexParamater(IGLDevice::Texture2D, IGLDevice::TextureWrapT, IGLDevice::Repeat);
-			dev->GenerateMipmap(IGLDevice::Texture2D);
+			Upload(*dev, bmp);
 			Handle<GLImage> image =
 			  Handle<GLImage>::New(tex, dev, (float)bmp.GetWidth(), (float)bmp.GetHeight());
 			image->wrap = IGLDevice::Repeat;
@@ -85,6 +92,19 @@ namespace spades {
 				return;
 			device->TexParamater(IGLDevice::Texture2D, IGLDevice::TextureMinFilter, filter);
 			minFilter = filter;
+		}
+
+		void GLImage::Replace(spades::Bitmap& bmp) {
+			SPADES_MARK_FUNCTION();
+			Bind(IGLDevice::Texture2D);
+			IGLDevice::Enum previousWrap = wrap;
+			Upload(*device, bmp);
+			wrap = IGLDevice::Repeat; // what Upload sets
+			SetWrap(previousWrap);
+			width = (float)bmp.GetWidth();
+			height = (float)bmp.GetHeight();
+			invWidth = 1.0F / width;
+			invHeight = 1.0F / height;
 		}
 
 		void GLImage::SubImage(spades::Bitmap* bmp, int x, int y) {

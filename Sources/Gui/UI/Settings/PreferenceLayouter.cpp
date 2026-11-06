@@ -255,6 +255,31 @@ namespace spades {
 			}
 		}
 
+		void StandardPreferenceLayouter::AddQualityPresetField(
+		    const std::string& caption, const std::vector<QualityPreset>& presets,
+		    const std::vector<std::string>& labels, const std::string& customLabel,
+		    bool enabled) {
+			UIElement* container = CreateBasicLabel(caption, enabled);
+
+			const size_t count = presets.size() + 1;
+			float width = (fieldWidth - (count - 1)) / count;
+			auto place = [&](Handle<ConfigToggleButtonBase> button, size_t i) {
+				button->SetBounds(
+				    AABB2(fieldX + static_cast<float>(i) * (width + 1.0F), 2.0F, width, 28.0F));
+				button->enable = enabled;
+				container->AddChild(button.GetPointerOrNull());
+			};
+			for (size_t i = 0; i < presets.size(); ++i)
+				place(Handle<QualityPresetButton>::New(&parent->GetManager(), labels[i], caption,
+				                                       presets[i])
+				        .Cast<ConfigToggleButtonBase>(),
+				      i);
+			place(Handle<QualityPresetCustomButton>::New(&parent->GetManager(), customLabel,
+			                                             caption, presets)
+			        .Cast<ConfigToggleButtonBase>(),
+			      presets.size());
+		}
+
 		void StandardPreferenceLayouter::AddToggleField(const std::string& caption,
 		                                                const std::string& configName, bool enabled) {
 			AddChoiceField(caption, configName,
