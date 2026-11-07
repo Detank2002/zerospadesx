@@ -301,6 +301,16 @@ jobs:
           python -m pip install piqueserver
           python Server/test/test_vr_presence.py -v
 
+      # the game reads ./Resources next to itself; ship the GPL paks only, as
+      # the Windows package does
+      - name: Add the game data
+        run: |
+          mkdir -p build/bin/Resources
+          for pak in pak002-Base pak005-Models pak010-BaseSkin pak050-Locales pak999-References; do
+            cp "build/Resources/$pak.pak" build/bin/Resources/
+          done
+          ls -la build/bin build/bin/Resources
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
