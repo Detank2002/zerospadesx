@@ -33,6 +33,15 @@ zs_test_executable(vr_pose_fixture
 	"${ZS_TEST_SOURCES}/Client/VRState.cpp")
 add_test(NAME vr_pose_roundtrip COMMAND vr_pose_fixture)
 
+# The self-updater's checks: SHA-256, the signed SHA256SUMS, package paths
+zs_test_executable(update_package_test
+	"${CMAKE_CURRENT_SOURCE_DIR}/update_package_test.cpp"
+	"${ZS_TEST_SOURCES}/Core/Sha256.cpp"
+	"${ZS_TEST_SOURCES}/Gui/UpdatePackage.cpp"
+	"${ZS_TEST_SOURCES}/monocypher/monocypher.c"
+	"${ZS_TEST_SOURCES}/monocypher/monocypher-ed25519.c")
+add_test(NAME update_package COMMAND update_package_test)
+
 # A VR player's pose, as a client without a headset decodes it (what a macOS
 # build draws other players' VR from)
 find_package(Python3 COMPONENTS Interpreter)
@@ -43,4 +52,4 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 add_custom_target(zs_tests DEPENDS
-	vr_state_test xr_caps_test vr_pose_fixture training_server_test)
+	vr_state_test xr_caps_test vr_pose_fixture update_package_test training_server_test)

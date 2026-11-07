@@ -20,6 +20,7 @@
 
 #include "UpdateNotice.h"
 
+#include <algorithm>
 #include <utility>
 
 #include <Client/IFont.h>
@@ -30,6 +31,7 @@
 #include <Core/Strings.h>
 #include <Gui/UI/Framework/UIManager.h>
 #include <Gui/UI/Widgets/DrawUtils.h>
+#include <Gui/SelfUpdater.h>
 #include <Gui/UpdateChecker.h>
 
 // Only the startup prompt can be turned off; the banner always announces a new
@@ -78,25 +80,70 @@ namespace spades {
 
 		void UpdateNotice::Refresh() {
 			// A found update is final for this process; resolve it only once.
-			if (isMouseInteractive)
-				return;
-
-			UpdateChecker::Result result = UpdateChecker::Get().GetResult();
-			upToDate = result.state == UpdateChecker::State::UpToDate;
-			if (result.state != UpdateChecker::State::UpdateAvailable)
-				return;
+			if (releaseUrl.empty()) {
+				UpdateChecker::Result result = UpdateChecker::Get().GetResult();
+				upToDate = result.state == UpdateChecker::State::UpToDate;
+				if (result.state != UpdateChecker::State::UpdateAvailable)
+					return;
+				releaseUrl = result.releaseUrl;
+				releaseTag = result.latestTag;
+				latestVersion = result.latestVersion.ToString();
+			}
 
 			isMouseInteractive = true;
-			releaseUrl = result.releaseUrl;
-			caption =
-			  _Tr("MainScreen",
-			      "ZeroSpades {0} is available (you have {1}). Click to open the release page.",
-			      result.latestVersion.ToString(), ReleaseVersion::Current().ToString());
+			progressFraction = -1.0F;
+			const std::string current = ReleaseVersion::Current().ToString();
+			if (!SelfUpdater::IsSupported()) {
+				caption = _Tr("MainScreen",
+				              "ZeroSpades X {0} is available (you have {1}). Click to open the "
+				              "release page.",
+				              latestVersion, current);
+				return;
+			}
+			const SelfUpdater::Progress p = SelfUpdater::Get().GetProgress();
+			switch (p.state) {
+				case SelfUpdater::State::Idle:
+					caption = _Tr("MainScreen",
+					              "ZeroSpades X {0} is available (you have {1}). Click to update.",
+					              latestVersion, current);
+					break;
+				case SelfUpdater::State::Working:
+					caption = p.status;
+					progressFraction = p.fraction;
+					isMouseInteractive = false;
+					break;
+				case SelfUpdater::State::Ready:
+					caption = _Tr("MainScreen",
+					              "ZeroSpades X {0} is ready. Click to restart and install it.",
+					              latestVersion);
+					progressFraction = 1.0F;
+					break;
+				case SelfUpdater::State::Failed: {
+					std::string why = p.error;
+					while (!why.empty() && (why.back() == '.' || why.back() == ' '))
+						why.pop_back();
+					caption = _Tr("MainScreen",
+					              "The update failed ({0}). Click to open the release page.", why);
+					break;
+				}
+			}
 		}
 
 		void UpdateNotice::OnActivated() {
-			if (!releaseUrl.empty())
-				OpenReleasePage(releaseUrl, releasePageOpened);
+			if (!releaseUrl.empty()) {
+				if (!SelfUpdater::IsSupported()) {
+					OpenReleasePage(releaseUrl, releasePageOpened);
+				} else {
+					switch (SelfUpdater::Get().GetProgress().state) {
+						case SelfUpdater::State::Idle: SelfUpdater::Get().Start(releaseTag); break;
+						case SelfUpdater::State::Ready: SelfUpdater::Get().InstallAndRestart(); break;
+						case SelfUpdater::State::Failed:
+							OpenReleasePage(releaseUrl, releasePageOpened);
+							break;
+						case SelfUpdater::State::Working: break;
+					}
+				}
+			}
 			ButtonBase::OnActivated();
 		}
 
@@ -131,7 +178,7 @@ namespace spades {
 
 		void UpdateNotice::Render() {
 			Refresh();
-			if (!isMouseInteractive) {
+			if (releaseUrl.empty()) {
 				if (showUpToDate && upToDate && !(upToDateCovered && upToDateCovered()))
 					RenderUpToDate();
 				return;
@@ -149,6 +196,12 @@ namespace spades {
 
 			ui::SetColorNP(r, MakeVector4(kAccent.x, kAccent.y, kAccent.z, fill));
 			r.DrawImage(nullptr, AABB2(pos.x, pos.y, sz.x, sz.y));
+			// A download's progress, as a brighter fill from the left
+			if (progressFraction > 0.0F) {
+				ui::SetColorNP(r, MakeVector4(kAccent.x, kAccent.y, kAccent.z, 0.35F));
+				r.DrawImage(nullptr,
+				            AABB2(pos.x, pos.y, sz.x * std::min(progressFraction, 1.0F), sz.y));
+			}
 			ui::SetColorNP(r, MakeVector4(kAccent.x, kAccent.y, kAccent.z, 0.7F));
 			r.DrawOutlinedRect(pos.x, pos.y, pos.x + sz.x, pos.y + sz.y);
 
@@ -176,28 +229,44 @@ namespace spades {
 				return;
 
 			UpdateChecker::Result result = UpdateChecker::Get().GetResult();
+			const bool selfUpdate = SelfUpdater::IsSupported();
 			std::string text =
-			  _Tr("MainScreen",
-			      "A new version of ZeroSpades is available!\n\n"
-			      "Installed version: {0}\nLatest version: {1}\n\n"
-			      "Open the release page to download it? ZeroSpades will close so the "
-			      "update can be installed.",
-			      ReleaseVersion::Current().ToString(), result.latestVersion.ToString());
+			  selfUpdate
+			    ? _Tr("MainScreen",
+			          "A new version of ZeroSpades X is available!\n\n"
+			          "Installed version: {0}\nLatest version: {1}\n\n"
+			          "Update now? It downloads while you stay in the menu; then click the "
+			          "banner at the top to restart into it.",
+			          ReleaseVersion::Current().ToString(), result.latestVersion.ToString())
+			    : _Tr("MainScreen",
+			          "A new version of ZeroSpades X is available!\n\n"
+			          "Installed version: {0}\nLatest version: {1}\n\n"
+			          "Open the release page to download it? ZeroSpades X will close so the "
+			          "update can be installed.",
+			          ReleaseVersion::Current().ToString(), result.latestVersion.ToString());
 
-			Handle<UpdatePromptScreen> prompt =
-			  Handle<UpdatePromptScreen>::New(owner, text, result.releaseUrl,
-			                                  std::move(releasePageOpened));
+			Handle<UpdatePromptScreen> prompt = Handle<UpdatePromptScreen>::New(
+			  owner, text, result.releaseUrl, result.latestTag, selfUpdate,
+			  std::move(releasePageOpened));
 			prompt->Run();
 		}
 
 		UpdatePromptScreen::UpdatePromptScreen(ui::UIElement* owner, const std::string& text,
 		                                       const std::string& releaseUrl,
+		                                       const std::string& releaseTag, bool selfUpdate,
 		                                       std::function<void()> releasePageOpened)
 		    : MessageBoxScreen(owner, text,
-		                       {_Tr("MainScreen", "Open Release Page"), _Tr("MainScreen", "Later")},
+		                       {selfUpdate ? _Tr("MainScreen", "Update Now")
+		                                   : _Tr("MainScreen", "Open Release Page"),
+		                        _Tr("MainScreen", "Later")},
 		                       kPromptHeight, true) {
-			closed = [releaseUrl, releasePageOpened](ui::UIElement& sender) {
-				if (static_cast<UpdatePromptScreen&>(sender).resultIndex == 0)
+			closed = [releaseUrl, releaseTag, selfUpdate,
+			          releasePageOpened](ui::UIElement& sender) {
+				if (static_cast<UpdatePromptScreen&>(sender).resultIndex != 0)
+					return;
+				if (selfUpdate)
+					SelfUpdater::Get().Start(releaseTag);
+				else
 					OpenReleasePage(releaseUrl, releasePageOpened);
 			};
 		}

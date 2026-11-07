@@ -71,6 +71,8 @@ namespace spades {
 				State state = State::Idle;
 				/** The latest published version; set when `state` is `UpdateAvailable`. */
 				ReleaseVersion latestVersion;
+				/** Its tag, e.g. "v0.3.1"; set with `latestVersion`. */
+				std::string latestTag;
 				/**
 				 * The release page to send the user to; always under the project's
 				 * GitHub releases, whatever the response said.

@@ -38,6 +38,7 @@
 #include <Gui/UI/Framework/UIManager.h>
 #include <Gui/UI/Widgets/DrawUtils.h>
 #include <Gui/OfficialMods.h>
+#include <Gui/SelfUpdater.h>
 #include <Gui/UpdateChecker.h>
 
 SPADES_SETTING(cg_playerName); // defined in Gui/MainScreen.cpp
@@ -203,6 +204,8 @@ namespace spades {
 
 			// The check answers asynchronously; announce a new release once, as soon
 			// as the menu is free of other dialogs.
+			SelfUpdater::RunTestIfAsked();
+
 			UpdatePromptScreen::ShowIfPending(mainMenu.GetPointerOrNull(),
 			                                  [this] { shouldExit = true; });
 

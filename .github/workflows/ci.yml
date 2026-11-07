@@ -72,6 +72,7 @@ jobs:
             -D CMAKE_BUILD_TYPE=Release `
             -D CMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
             -D VCPKG_TARGET_TRIPLET=x86-windows-static `
+            -D ZEROSPADES_UPDATE_PACKAGE=windows-x86 `
             -D CMAKE_CXX_STANDARD=17
 
       - name: Build application
@@ -123,6 +124,7 @@ jobs:
             -D CMAKE_BUILD_TYPE=Release `
             -D CMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
             -D VCPKG_TARGET_TRIPLET=x64-windows-static `
+            -D ZEROSPADES_UPDATE_PACKAGE=windows-x64 `
             -D CMAKE_CXX_STANDARD=17 | Tee-Object configure.log
           if (-not (Select-String -Quiet -Path configure.log -Pattern 'OpenXR VR: ENABLED')) {
             Write-Error 'The Windows x64 build must have VR (OpenXR VR: ENABLED)'
@@ -279,6 +281,7 @@ jobs:
         run: |
           cmake -S . -B build \
             -D CMAKE_BUILD_TYPE=Release \
+            -D ZEROSPADES_UPDATE_PACKAGE=linux-x64 \
             -D CMAKE_CXX_STANDARD=17 | tee configure.log
           grep -q 'OpenXR VR: ENABLED' configure.log || { echo "::error::the Linux x64 build must have VR"; exit 1; }
           cmake --build build --parallel $(nproc)

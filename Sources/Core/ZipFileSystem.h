@@ -39,6 +39,7 @@ namespace spades {
 		class ZipFileHandle;
 
 		IStream* baseStream;
+		bool ownsBaseStream;
 		unzFile zip;
 
 		std::map<std::string, unz_file_pos_s> files;
@@ -60,7 +61,11 @@ namespace spades {
 		bool MoveToFile(const char*);
 
 	public:
-		ZipFileSystem(IStream*);
+		/**
+		 * Reads the zip in `stream`. With `ownsStream`, the stream (and the file
+		 * under it) is closed with this; otherwise its owner keeps it.
+		 */
+		ZipFileSystem(IStream* stream, bool ownsStream = false);
 		~ZipFileSystem();
 
 		std::vector<std::string> EnumFiles(const char*) override;

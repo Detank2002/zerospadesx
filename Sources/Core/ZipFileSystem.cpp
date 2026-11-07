@@ -280,7 +280,8 @@ namespace spades {
 
 #pragma mark - Zip file
 
-	ZipFileSystem::ZipFileSystem(IStream* stream) : baseStream(stream) {
+	ZipFileSystem::ZipFileSystem(IStream* stream, bool ownsStream)
+	    : baseStream(stream), ownsBaseStream(ownsStream) {
 		SPADES_MARK_FUNCTION();
 
 		cursorPos = stream->GetPosition();
@@ -321,6 +322,10 @@ namespace spades {
 			currentStream->ForceCloseUnzipFile();
 
 		unzClose(zip);
+		// Else the pak stayed open until the process ended, and an update could
+		// not replace it.
+		if (ownsBaseStream)
+			delete baseStream;
 	}
 
 	std::unique_ptr<IStream> ZipFileSystem::OpenForReading(const char* fn) {

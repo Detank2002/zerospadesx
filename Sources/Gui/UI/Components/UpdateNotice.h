@@ -29,7 +29,10 @@
 namespace spades {
 	namespace gui {
 		/**
-		 * A clickable strip announcing a newer release, which opens the release page.
+		 * A clickable strip announcing a newer release. A copy that can update
+		 * itself (`SelfUpdater::IsSupported`) downloads the update when clicked,
+		 * shows its progress, and restarts into it on a second click; any other
+		 * copy, or one whose update failed, opens the release page.
 		 *
 		 * It stays in the tree from the start and follows `UpdateChecker` on its own:
 		 * until an update is known it draws nothing and ignores the mouse, so owners
@@ -46,6 +49,9 @@ namespace spades {
 			const bool showUpToDate;
 			bool upToDate = false;
 			std::string releaseUrl;
+			std::string releaseTag;
+			std::string latestVersion;
+			float progressFraction = -1.0F;
 			std::function<void()> releasePageOpened;
 
 			void Refresh();
@@ -63,8 +69,9 @@ namespace spades {
 		};
 
 		/**
-		 * The dialog shown once per launch when an update is found, offering to open
-		 * the release page, unless turned off with `cl_zsUpdatePrompt`. Escape
+		 * The dialog shown once per launch when an update is found, offering to
+		 * download it (or, for a copy that cannot update itself, to open the release
+		 * page), unless turned off with `cl_zsUpdatePrompt`. Escape
 		 * dismisses; Enter does nothing, since the prompt can appear mid-keystroke. `releasePageOpened`
 		 * runs once the browser has the page, as for `UpdateNotice`.
 		 */
@@ -75,8 +82,8 @@ namespace spades {
 			                          std::function<void()> releasePageOpened);
 
 			UpdatePromptScreen(ui::UIElement* owner, const std::string& text,
-			                   const std::string& releaseUrl,
-			                   std::function<void()> releasePageOpened);
+			                   const std::string& releaseUrl, const std::string& releaseTag,
+			                   bool selfUpdate, std::function<void()> releasePageOpened);
 			~UpdatePromptScreen() override;
 
 			void HotKey(const std::string& key) override;

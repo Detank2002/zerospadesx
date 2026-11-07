@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace spades {
@@ -48,4 +49,10 @@ namespace spades {
 
 	/** Relaunch the program with --open-mods, then exit the current process. */
 	void RelaunchForMods();
+
+	/**
+	 * Closes every file the game holds, runs `install` (which may replace the
+	 * game's own files), starts the program again and exits the current process.
+	 */
+	void RelaunchAfterUpdate(const std::function<void()>& install);
 } // namespace spades

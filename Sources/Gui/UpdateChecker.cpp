@@ -192,6 +192,7 @@ namespace spades {
 
 				const ReleaseVersion current = ReleaseVersion::Current();
 				r.latestVersion = *latest;
+				r.latestTag = tag;
 				r.releaseUrl = std::move(releaseUrl);
 				r.state = current < *latest ? State::UpdateAvailable : State::UpToDate;
 

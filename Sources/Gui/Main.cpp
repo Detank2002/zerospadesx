@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <regex>
 #include <set>
@@ -57,6 +58,7 @@
 #include <Core/ZipFileSystem.h>
 #include <Gui/ConsoleScreen.h>
 #include <Gui/ModOverlay.h>
+#include <Gui/SelfUpdater.h>
 #include <Gui/StartupScreen.h>
 #include <Gui/UI/Settings/QualityPresets.h>
 #include <ZeroSpades.h>
@@ -504,77 +506,104 @@ extern char** environ;
 #endif
 
 namespace spades {
+	namespace {
+		/** Starts a new instance of this binary, with `extraArg` if not null. */
+		void SpawnSelf(const char* extraArg) {
+#ifdef _WIN32
+			std::wstring exe;
+			{
+				auto* ws = (wchar_t*)SDL_iconv_string(
+				  "UCS-2-INTERNAL", "UTF-8", g_executablePath.c_str(),
+				  g_executablePath.size() + 1);
+				if (ws) {
+					exe.assign(ws);
+					SDL_free(ws);
+				}
+			}
+			std::wstring cmd = L"\"" + exe + L"\"";
+			if (extraArg) {
+				cmd += L" ";
+				for (const char* c = extraArg; *c; ++c)
+					cmd += static_cast<wchar_t>(*c); // an ASCII option
+			}
+			STARTUPINFOW si{};
+			si.cb = sizeof(si);
+			PROCESS_INFORMATION pi{};
+			if (CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE,
+			                   0, nullptr, nullptr, &si, &pi)) {
+				CloseHandle(pi.hThread);
+				CloseHandle(pi.hProcess);
+			}
+#elif defined(__APPLE__)
+			// Prefer launching the .app bundle via `open -n` so the new process
+			// becomes a proper foreground application; fall back to executing
+			// the binary directly if we can't find the bundle.
+			std::string base = g_executablePath;
+			std::string appPath;
+			auto pos = base.find(".app/");
+			if (pos != std::string::npos)
+				appPath = base.substr(0, pos + 4);
+
+			std::vector<const char*> args;
+			if (!appPath.empty()) {
+				args.push_back("open");
+				args.push_back("-n");
+				args.push_back(appPath.c_str());
+				if (extraArg) {
+					args.push_back("--args");
+					args.push_back(extraArg);
+				}
+				args.push_back(nullptr);
+				pid_t pid = 0;
+				posix_spawnp(&pid, args[0], nullptr, nullptr,
+				             const_cast<char**>(args.data()), environ);
+			} else {
+				args.push_back(g_executablePath.c_str());
+				if (extraArg)
+					args.push_back(extraArg);
+				args.push_back(nullptr);
+				pid_t pid = 0;
+				posix_spawnp(&pid, args[0], nullptr, nullptr,
+				             const_cast<char**>(args.data()), environ);
+			}
+#else
+			const char* argv[] = {g_executablePath.c_str(), extraArg, nullptr};
+			pid_t pid = 0;
+			posix_spawnp(&pid, argv[0], nullptr, nullptr,
+			             const_cast<char**>(argv), environ);
+#endif
+		}
+
+		/**
+		 * Releases every file handle this process holds before a replacement
+		 * starts. On Windows a file open for writing without shared access
+		 * can't be reopened by another process, so if the old process still held
+		 * SystemMessages.log the fresh instance would fail to start logging. By
+		 * closing first, the new process always finds the files free — no race,
+		 * no startup delay. The game's paks are closed too, so an update can
+		 * replace them.
+		 */
+		void CloseForRelaunch() {
+			Settings::GetInstance()->Flush();
+			StopLog();
+			FileManager::Close();
+		}
+	} // namespace
+
 	void RelaunchForMods() {
 		// Spawn a new instance of the same binary with --open-mods, then exit.
-		Settings::GetInstance()->Flush();
-
-		// Release every file handle this process holds before spawning the
-		// replacement. On Windows a file open for writing without shared access
-		// can't be reopened by another process, so if the old process still held
-		// SystemMessages.log the fresh instance would fail to start logging. By
-		// closing first, the new process always finds the files free — no race,
-		// no startup delay.
-		StopLog();
-		FileManager::Close();
-
-#ifdef _WIN32
-		std::wstring exe;
-		{
-			auto* ws = (wchar_t*)SDL_iconv_string(
-			  "UCS-2-INTERNAL", "UTF-8", g_executablePath.c_str(),
-			  g_executablePath.size() + 1);
-			if (ws) {
-				exe.assign(ws);
-				SDL_free(ws);
-			}
-		}
-		std::wstring cmd = L"\"" + exe + L"\" --open-mods";
-		STARTUPINFOW si{};
-		si.cb = sizeof(si);
-		PROCESS_INFORMATION pi{};
-		if (CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE,
-		                   0, nullptr, nullptr, &si, &pi)) {
-			CloseHandle(pi.hThread);
-			CloseHandle(pi.hProcess);
-		}
-#elif defined(__APPLE__)
-		// Prefer launching the .app bundle via `open -n` so the new process
-		// becomes a proper foreground application; fall back to executing
-		// the binary directly if we can't find the bundle.
-		std::string base = g_executablePath;
-		std::string appPath;
-		auto pos = base.find(".app/");
-		if (pos != std::string::npos)
-			appPath = base.substr(0, pos + 4);
-
-		std::vector<const char*> args;
-		if (!appPath.empty()) {
-			args.push_back("open");
-			args.push_back("-n");
-			args.push_back(appPath.c_str());
-			args.push_back("--args");
-			args.push_back("--open-mods");
-			args.push_back(nullptr);
-			pid_t pid = 0;
-			posix_spawnp(&pid, args[0], nullptr, nullptr,
-			             const_cast<char**>(args.data()), environ);
-		} else {
-			args.push_back(g_executablePath.c_str());
-			args.push_back("--open-mods");
-			args.push_back(nullptr);
-			pid_t pid = 0;
-			posix_spawnp(&pid, args[0], nullptr, nullptr,
-			             const_cast<char**>(args.data()), environ);
-		}
-#else
-		const char* argv[] = {g_executablePath.c_str(), "--open-mods", nullptr};
-		pid_t pid = 0;
-		posix_spawnp(&pid, argv[0], nullptr, nullptr,
-		             const_cast<char**>(argv), environ);
-#endif
+		CloseForRelaunch();
+		SpawnSelf("--open-mods");
 
 		// Skip atexit handlers — SDL/GL teardown can stall here, and the
 		// fresh process is already on its way.
+		_exit(0);
+	}
+
+	void RelaunchAfterUpdate(const std::function<void()>& install) {
+		CloseForRelaunch();
+		install();
+		SpawnSelf(nullptr);
 		_exit(0);
 	}
 } // namespace spades
@@ -971,6 +1000,8 @@ int main(int argc, char** argv) {
 #endif
 			core_executablePath = exePath;
 		}
+		// What the last self-update moved aside, or why it failed
+		spades::gui::SelfUpdater::CleanUpAfterUpdate();
 		pumpEvents();
 
 		// dump CPU info (for debugging?)
@@ -1050,7 +1081,7 @@ int main(int argc, char** argv) {
 
 					stream->SetPosition(0);
 
-					spades::ZipFileSystem* fs = new spades::ZipFileSystem(stream.release());
+					spades::ZipFileSystem* fs = new spades::ZipFileSystem(stream.release(), true);
 					if (name[0] == '_' && false) { // last resort for #198
 						SPLog("Pak registered: %s: %08lx (marked as 'important')", name.c_str(),
 							  static_cast<unsigned long>(crc));
@@ -1086,7 +1117,7 @@ int main(int argc, char** argv) {
 				SPLog("Mod folder mounted: %s", path.c_str());
 			} else if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
 				spades::FileManager::PrependFileSystem(
-				  new spades::ZipFileSystem(new spades::StdStream(f, true)));
+				  new spades::ZipFileSystem(new spades::StdStream(f, true), true));
 				SPLog("Mod pak mounted: %s", path.c_str());
 			} else {
 				SPLog("Mod to try failed to open: %s", path.c_str());

@@ -53,10 +53,11 @@ if(USE_OPENXR)
 endif()
 file(GLOB SCRIPTBINDING_FILES ScriptBindings/*.cpp ScriptBindings/*.h)
 file(GLOB UNZIP_FILES unzip/*.c unzip/*.h)
+file(GLOB MONOCYPHER_FILES monocypher/*.c monocypher/*.h)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 	set_source_files_properties(
-		${ENET_FILES} ${KISS_FILES} ${JSON_FILES} ${UNZIP_FILES}
+		${ENET_FILES} ${KISS_FILES} ${JSON_FILES} ${UNZIP_FILES} ${MONOCYPHER_FILES}
 		PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -65,6 +66,19 @@ endif()
 
 if(APPLE)
 	file(GLOB PLATFORM_FILES Core/*.mm)
+endif()
+
+# The release package a build updates itself from (Gui/UpdatePackage.h), set by
+# CI for the packages it publishes. Empty: the game only links to the release.
+set(ZEROSPADES_UPDATE_PACKAGE "" CACHE STRING
+	"Release package this build updates itself from: windows-x64, windows-x86, linux-x64 or empty")
+if(NOT ZEROSPADES_UPDATE_PACKAGE MATCHES "^(|windows-x64|windows-x86|linux-x64)$")
+	message(FATAL_ERROR "ZEROSPADES_UPDATE_PACKAGE: unknown package '${ZEROSPADES_UPDATE_PACKAGE}'")
+endif()
+if(ZEROSPADES_UPDATE_PACKAGE)
+	message(STATUS "Self-update: from the ${ZEROSPADES_UPDATE_PACKAGE} package")
+	set_source_files_properties(Gui/UpdatePackage.cpp PROPERTIES
+		COMPILE_DEFINITIONS "ZEROSPADES_UPDATE_PACKAGE=\"${ZEROSPADES_UPDATE_PACKAGE}\"")
 endif()
 
 add_subdirectory(AngelScript/projects/cmake)
@@ -98,7 +112,7 @@ set(ZEROSPADES_SOURCES
 	${AUDIO_FILES} ${AUDIO_AL_FILES} ${BINPACK_FILES} ${CLIENT_FILES}
 	${CORE_FILES} ${PLATFORM_FILES} ${DRAW_FILES} ${DRAW_GL_FILES} ${DRAW_SW_FILES} ${DRAW_VK_FILES} ${VR_FILES} ${ENET_FILES}
 	${ENET_INCLUDE} ${GUI_FILES} ${GUI_COMPONENTS_FILES} ${GUI_UTILS_FILES} ${GUI_UI_FILES} ${IMPORTS_FILES} ${KISS_FILES}
-	${JSON_FILES} ${JSON_INCLUDE} ${UNZIP_FILES} ${SCRIPTBINDING_FILES}
+	${JSON_FILES} ${JSON_INCLUDE} ${UNZIP_FILES} ${MONOCYPHER_FILES} ${SCRIPTBINDING_FILES}
 	${RESOURCE_FILES})
 if(ANDROID)
 	# An Android app is a library its activity loads: SDL's loads libmain.so.

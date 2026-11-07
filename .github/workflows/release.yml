@@ -66,6 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           mkdir -p release-assets
           # The newest artifact of each name, so a re-run job replaces its older upload
@@ -118,7 +119,21 @@ jobs:
           [ -s "release-assets/ZeroSpadesX-${VERSION}-quest3.apk" ] || { echo "::error::no Quest APK"; exit 1; }
 
           (cd release-assets && sha256sum * > SHA256SUMS)
-          printf '## Downloads\n%s\nChecksums are in SHA256SUMS.\n' "$list" > notes.md
+
+          # The game's self-updater installs a package only if SHA256SUMS
+          # carries the release key's signature (Sources/Gui/UpdatePackage.h)
+          [ -n "$UPDATE_SIGNING_KEY" ] || { echo "::error::a release needs the UPDATE_SIGNING_KEY secret"; exit 1; }
+          (umask 077 && printf '%s\n' "$UPDATE_SIGNING_KEY" > signing.pem)
+          openssl pkeyutl -sign -inkey signing.pem -rawin -in release-assets/SHA256SUMS -out release-assets/SHA256SUMS.sig
+          openssl pkey -in signing.pem -pubout -out signing.pub
+          rm -f signing.pem
+          openssl pkeyutl -verify -pubin -inkey signing.pub -rawin -in release-assets/SHA256SUMS -sigfile release-assets/SHA256SUMS.sig
+          # The key the game has built in must be this one
+          built_in="$(sed -n '/static const UpdatePublicKey key = {/,/};/p' Sources/Gui/UpdatePackage.cpp | grep -o '0x[0-9a-f][0-9a-f]' | sed 's/0x//' | tr -d '\n')"
+          signing="$(openssl pkey -pubin -in signing.pub -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
+          rm -f signing.pub
+          [ "$built_in" = "$signing" ] || { echo "::error::UPDATE_SIGNING_KEY is not the key built into the game"; exit 1; }
+          printf '## Downloads\n%s\nChecksums are in SHA256SUMS, signed in SHA256SUMS.sig by the release key.\n' "$list" > notes.md
           cat notes.md
 
       - name: Publish

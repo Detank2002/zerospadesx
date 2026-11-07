@@ -22,6 +22,17 @@ makes it; ZeroSpades X follows its `vulkan-2` branch.
 * **macOS** builds have no VR (there is no OpenXR runtime there), but they
   draw other players' VR like the rest.
 
+### Updating
+The game checks for a new release at startup. The Windows (x64, x86) and
+Linux x64 packages update themselves: click **Update Now** (or the banner at
+the top of the menu), keep playing in the menu while it downloads, then click
+the banner to restart into the new version. Your settings, mods and demos are
+kept. A package is installed only if the release's `SHA256SUMS` carries the
+release key's signature (`SHA256SUMS.sig`) and the package matches its sum.
+The game needs to be able to write to its own folder (on Linux, run it from
+that folder); otherwise, and on macOS, Nix and the Quest, the banner opens the
+release page to download it by hand.
+
 Releases are tags (`v0.3.0`, ...). The `zerospadesx` branch is rebased onto
 upstream's `vulkan-2` before each release, so its history is rewritten then;
 build from a tag if you want a fixed point.

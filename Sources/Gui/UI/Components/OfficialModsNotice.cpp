@@ -40,7 +40,7 @@ namespace spades {
 
 			// Where a player goes to update the game for newer official mods.
 			constexpr const char* kGameReleasesPageUrl =
-			  "https://github.com/zerospades/zerospades/releases/latest";
+			  "https://github.com/Detank2002/zerospadesx/releases/latest";
 		} // namespace
 
 		OfficialModsNotice::OfficialModsNotice(ui::UIManager* manager,
