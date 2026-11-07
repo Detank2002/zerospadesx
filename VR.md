@@ -305,8 +305,9 @@ feels less solid; lower `vr_renderScale` or the graphics settings until it holds
 `vr_showFps 0` hides it.
 
 **The HUD.** The HUD is on your off hand's wrist: health, ammo, the tool bar,
-the block palette, the minimap, the player count, chat, the kill feed,
-messages and alerts, and the respawn timer. Health and ammo (or blocks, or
+the block palette, the minimap, the player count, chat, messages and
+alerts, and the respawn timer. The kill feed stays in front of you, at the top
+right as on a monitor (`vr_killfeed`: 1 in front, 2 on the wrist, 0 off). Health and ammo (or blocks, or
 grenades) are a watch's face, large along the bottom (`Client::DrawVRWatch`):
 the monitor's corner numbers were small on a panel a hand's width across
 (testers asked). Turn the back of that wrist

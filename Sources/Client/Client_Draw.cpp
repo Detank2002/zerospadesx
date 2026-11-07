@@ -69,6 +69,10 @@ SPADES_SETTING(vr_wristHud);
 SPADES_SETTING(cg_reflexScope);
 SPADES_SETTING(vr_showFps);
 SPADES_SETTING(vr_heldMap);
+// Where a headset shows the kill feed: 1 in front of you, at its corner of the
+// panel the chat comes up on; 2 on the wrist with the rest of the HUD; 0 not
+// at all. Testers took it off the crowded wrist, which left it nowhere.
+DEFINE_SPADES_SETTING(vr_killfeed, "1");
 DEFINE_SPADES_SETTING(cg_debugAim, "0");
 SPADES_SETTING(cg_keyReloadWeapon);
 SPADES_SETTING(cg_keyJump);
@@ -3312,8 +3316,9 @@ namespace spades {
 							// the chat panel shows the history by itself while it is open
 							if (!chatInFront && !isChatPanelVisible)
 								chatWindow->Draw();
-							// Not the kill feed on the wrist (testers)
-							if (!onWrist)
+							// On the wrist only if asked for (testers found it
+							// crowded there); see vr_killfeed
+							if (!onWrist || (int)vr_killfeed == 2)
 								killfeedWindow->Draw();
 
 							// above the chat
@@ -3341,6 +3346,9 @@ namespace spades {
 
 					if (chatInFront && !isChatPanelVisible)
 						chatWindow->Draw();
+					// The kill feed in front, where it is on a monitor
+					if (onWrist && (int)vr_killfeed == 1)
+						killfeedWindow->Draw();
 
 					// Where the hits came from, around where you look.
 					if (onWrist && !localPlayerIsSpectator && player.IsAlive())
