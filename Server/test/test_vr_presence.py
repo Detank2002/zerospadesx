@@ -291,16 +291,29 @@ max_step = 0.6
         for c in self.clients:
             c.packets.clear()
 
+    def relayed(self, send, timeout=10.0):
+        """Runs `send` (one pose, or a burst) and returns the poses the flat
+        player heard from it, trying again until it hears some or `timeout`
+        passes. The poses go unreliable, and the server drops every one sent
+        while the VR player is dead or between lives, so a single try can
+        come back empty on a slow machine without anything being wrong."""
+        deadline = time.time() + timeout
+        while True:
+            time.sleep(0.2)  # past the rate limit of the try before
+            self.clear()
+            send()
+            self.pump_all(0.4)
+            got = self.flat.vr_packets()
+            if got or time.time() > deadline:
+                return got
+
     def test_1_extension_is_advertised(self):
         self.assertIn(EXT, self.vr.server_extensions)
 
     def test_2_pose_reaches_extension_clients_only(self):
-        self.clear()
         payload = pack_pose(3, head=(0.1, 0.0, -0.05), left=(-0.5, 0.4, 0.6),
                             right=(0.6, 0.3, 0.5), buttons=1)
-        self.send_pose(payload)
-        self.pump_all(0.5)
-        got = self.flat.vr_packets()
+        got = self.relayed(lambda: self.send_pose(payload))
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0][2], self.vr.player_id)
         self.assertEqual(got[0][3:], payload)
@@ -316,12 +329,11 @@ max_step = 0.6
         self.assertEqual(self.stock.configs, [])
 
     def test_4_rate_limit(self):
-        time.sleep(0.2)
-        self.clear()
-        for _ in range(6):
-            self.send_pose(pack_pose(3))
-        self.pump_all(0.4)
-        self.assertEqual(len(self.flat.vr_packets()), 1)
+        def burst():
+            for _ in range(6):
+                self.send_pose(pack_pose(3))
+        # Six at once, and one gets through
+        self.assertEqual(len(self.relayed(burst)), 1)
 
     def test_5_implausible_pose_is_dropped(self):
         time.sleep(0.2)
@@ -343,11 +355,16 @@ max_step = 0.6
         self.assertIsNotNone(before, 'no WorldUpdate for the VR player')
         x, y, z = before
 
-        # A small step is taken...
-        time.sleep(0.2)
-        self.send_pose(pack_pose(4, body=(x + 0.3, y, z)))
-        self.pump_all(0.6)
-        after = self.flat.world_position(self.vr.player_id)
+        # A small step is taken (sent again until the server moves the body,
+        # as a pose can be dropped)...
+        deadline = time.time() + 10.0
+        while True:
+            time.sleep(0.2)
+            self.send_pose(pack_pose(4, body=(x + 0.3, y, z)))
+            self.pump_all(0.6)
+            after = self.flat.world_position(self.vr.player_id)
+            if abs(after[0] - (x + 0.3)) <= 0.05 or time.time() > deadline:
+                break
         self.assertAlmostEqual(after[0], x + 0.3, delta=0.05,
                                msg=f'body at {before}, then {after}')
 
