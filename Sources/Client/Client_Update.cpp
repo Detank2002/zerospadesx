@@ -230,6 +230,7 @@ namespace spades {
 				if (clientPlayers[i] && !clientPlayers[i]->HasCurrentSkins())
 					PlayerObjectSet(static_cast<int>(i));
 			}
+			EnsureClientPlayers();
 
 			stmp::optional<Player&> maybePlayer = world->GetLocalPlayer();
 
@@ -797,12 +798,51 @@ namespace spades {
 		}
 
 		void Client::PlayerObjectSet(int id) {
+			missingClientPlayers.erase(id); // set anew: worth trying again
+			MakeClientPlayer(id);
+		}
+
+		void Client::MakeClientPlayer(int id) {
+			if (id < 0)
+				return;
+			if (static_cast<std::size_t>(id) >= clientPlayers.size())
+				clientPlayers.resize(static_cast<std::size_t>(id) + 1);
 			if (clientPlayers[id])
 				clientPlayers[id] = nullptr;
 
 			stmp::optional<Player&> p = world->GetPlayer(id);
-			if (p)
+			if (!p)
+				return;
+			// A skin script that fails must not leave a player in the world with
+			// nothing to draw it: everything that draws players takes one for
+			// granted. Logged, and tried again by `EnsureClientPlayers`.
+			try {
 				clientPlayers[id] = Handle<ClientPlayer>::New(*p, *this);
+			} catch (const std::exception& ex) {
+				SPLog("[!] Cannot make the view of player #%d (%s): %s", id,
+				      p->GetName().c_str(), ex.what());
+			}
+		}
+
+		void Client::EnsureClientPlayers() {
+			if (!world)
+				return;
+			const std::size_t slots = world->GetNumPlayerSlots();
+			if (clientPlayers.size() < slots)
+				clientPlayers.resize(slots);
+			for (std::size_t i = 0; i < slots; i++) {
+				if (clientPlayers[i] || !world->GetPlayer(static_cast<unsigned int>(i)))
+					continue;
+				// A player whose view is missing: made now, so it is drawn (a Mac
+				// crashed drawing such a player). Tried once until the player is set
+				// again (a respawn tries anew), so a skin that always fails is not
+				// built and logged every frame.
+				if (!missingClientPlayers.insert(static_cast<int>(i)).second)
+					continue;
+				SPLog("[!] Player #%d is in the world without a view; making it now",
+				      static_cast<int>(i));
+				MakeClientPlayer(static_cast<int>(i));
+			}
 		}
 
 		void Client::PlayerJumped(spades::client::Player& p) {
@@ -1805,6 +1845,9 @@ namespace spades {
 			// trajectory of the fired bullet (as far as the game physics is concerned), but
 			// displaying it as-is would make it seem like it was fired from a skull gun. Rewrite
 			// the starting point with the visual muzzle point of the current weapon skin.
+			if (static_cast<std::size_t>(p.GetId()) >= clientPlayers.size() ||
+			    !clientPlayers[p.GetId()])
+				return;
 			Handle<ClientPlayer> clientPlayer = clientPlayers[p.GetId()];
 			muzzlePos = isFirstPerson ? clientPlayer->GetMuzzlePositionInFirstPersonView()
 									  : clientPlayer->GetMuzzlePosition();

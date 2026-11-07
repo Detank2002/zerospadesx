@@ -1470,7 +1470,10 @@ namespace spades {
 			float spread = weapon.GetSpread();
 
 			// halve spread when aiming
-			float aimDownState = clientPlayers[p.GetId()]->GetAimDownState();
+			const std::size_t viewId = static_cast<std::size_t>(p.GetId());
+			float aimDownState = viewId < clientPlayers.size() && clientPlayers[viewId]
+			                       ? clientPlayers[viewId]->GetAimDownState()
+			                       : 0.0F;
 			if (aimDownState > 0.99F)
 				spread /= 2;
 
@@ -2134,7 +2137,9 @@ namespace spades {
 			// draw weapon skin's 2D layer
 			int focusedPlayerId = GetCameraTargetPlayerId();
 			Player& p = world->GetPlayer(focusedPlayerId).value();
-			clientPlayers[focusedPlayerId]->Draw2D();
+			if (static_cast<std::size_t>(focusedPlayerId) < clientPlayers.size() &&
+			    clientPlayers[focusedPlayerId])
+				clientPlayers[focusedPlayerId]->Draw2D();
 
 			// The compass exists only where the server allows it: it is a client-side
 			// feature the extension governs, and a client never turns one on by itself.

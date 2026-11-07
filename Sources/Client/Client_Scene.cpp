@@ -172,6 +172,9 @@ namespace spades {
 			if (!p.IsAlive() || !p.IsToolWeapon())
 				return 1.0F;
 
+			if (static_cast<std::size_t>(playerId) >= clientPlayers.size() ||
+			    !clientPlayers[playerId])
+				return 1.0F;
 			float aimDownState = clientPlayers[playerId]->GetAimDownState();
 
 			float delta = 0.8F;
@@ -708,9 +711,11 @@ namespace spades {
 				// Each player's glare and how strongly it shows, worked out by `AddToScene`
 				std::vector<std::pair<float, ClientPlayer*>> glares;
 
+				EnsureClientPlayers();
 				for (size_t i = 0; i < world->GetNumPlayerSlots(); i++) {
-					if (world->GetPlayer(static_cast<unsigned int>(i))) {
-						SPAssert(clientPlayers[i]);
+					// A player whose view could not be made is not drawn.
+					if (world->GetPlayer(static_cast<unsigned int>(i)) && i < clientPlayers.size() &&
+					    clientPlayers[i]) {
 						clientPlayers[i]->AddToScene();
 						const float strength = clientPlayers[i]->GetFlashlightGlareStrength();
 						if (strength > 0.0F)

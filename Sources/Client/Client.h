@@ -28,6 +28,7 @@
 #include <tuple>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "ClientCameraMode.h"
 #include "DemoNetClient.h"
@@ -172,6 +173,13 @@ namespace spades {
 
 			// view/drawing state for some world objects
 			std::vector<Handle<ClientPlayer>> clientPlayers;
+			// Players found in the world without a view and made one by
+			// `EnsureClientPlayers`, until the world sets them again
+			std::unordered_set<int> missingClientPlayers;
+			/** Makes the view of the world's player `id`, if any; logs a failure. */
+			void MakeClientPlayer(int id);
+			/** Makes the view of any player in the world that has none. */
+			void EnsureClientPlayers();
 
 			// other windows
 			std::unique_ptr<CenterMessageView> centerMessageView;

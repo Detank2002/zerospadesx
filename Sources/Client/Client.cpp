@@ -248,6 +248,7 @@ namespace spades {
 			largeMapView->SetZoom(false);
 
 			clientPlayers.clear();
+			missingClientPlayers.clear();
 
 			if (world) {
 				world->SetListener(nullptr);
@@ -358,6 +359,7 @@ namespace spades {
 			audioDevice->SetGameMap(nullptr);
 
 			clientPlayers.clear();
+			missingClientPlayers.clear();
 
 			scriptedUI->ClientDestroyed();
 			tcView.reset();
