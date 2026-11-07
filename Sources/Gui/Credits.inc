@@ -7,6 +7,13 @@ Quest 3 build, by Detank2002. ZeroSpades is a fork of OpenSpades by yvt and
 its contributors, credited below.
 
 
+ZeroSpades X
+------------
+
+"Detank2002" - VR, the Quest 3 build, the training course
+"ATELSA" - VR testing, ideas
+
+
 Credits
 -------
 

@@ -198,4 +198,6 @@ ZeroSpades X is built on [ZeroSpades](https://github.com/Fran6nd/zerospades)
 by Fran6nd, which is a fork of [OpenSpades](https://github.com/yvt/openspades)
 by yvt and its contributors. Please see the file named LICENSE.
 
+Thanks to ATELSA for VR testing and ideas.
+
 Note that other assets including sounds and models are not open source.
