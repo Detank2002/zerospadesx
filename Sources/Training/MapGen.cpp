@@ -2,6 +2,7 @@
 
 #include "VoxelMap.h"
 #include "TrainingCourse.h"
+#include "TrainingModes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -249,6 +250,56 @@ void generate_training_map(VoxelMap& map) {
     map.set(kMarkerX, kMarkerY, kMarkerZ,
             ((kMarkerRGB >> 16) & 0xFFu) << 16 | ((kMarkerRGB >> 8) & 0xFFu) << 8 |
               (kMarkerRGB & 0xFFu) | (0x7Fu << 24));
+}
+
+void generate_aim_arena(VoxelMap& map, int scenario) {
+    using namespace training;
+    const RGB floor_a{150, 152, 156}, floor_b{136, 138, 142}, grid{110, 112, 118};
+    const RGB wall{84, 88, 98}, stand{170, 120, 60}, stand_top{205, 150, 70};
+    const RGB spot{40, 160, 220}, lane{220, 190, 60};
+    auto jitter = [](int x, int y, int z) {
+        return static_cast<int>(hash3(x * 64 + z, y, 11u) % 7) - 3;
+    };
+    // The floor: a pale grid every four blocks, so distance and movement read.
+    for (int x = kArenaX0; x <= kArenaX1; ++x) {
+        for (int y = kArenaY0; y <= kArenaY1; ++y) {
+            RGB c = ((x / 4 + y / 4) % 2) ? floor_a : floor_b;
+            if (x % 8 == 0 || y % 8 == 0) c = grid;
+            map.set(x, y, kArenaFloorZ, pack(c, 1.0f, jitter(x, y, kArenaFloorZ)));
+        }
+    }
+    // Where the player stands
+    for (int x = kAimSpawnX - 1; x <= kAimSpawnX + 1; ++x)
+        for (int y = kAimSpawnY - 1; y <= kAimSpawnY + 1; ++y)
+            map.set(x, y, kArenaFloorZ, pack(spot, 1.0f, 0));
+    // The walls, up to the roof, so nobody wanders off the arena.
+    for (int x = kArenaX0 - 1; x <= kArenaX1 + 1; ++x) {
+        for (int z = kRoofZ; z < kArenaFloorZ; ++z) {
+            map.set(x, kArenaY0 - 1, z, pack(wall, 1.0f, jitter(x, kArenaY0 - 1, z)));
+            map.set(x, kArenaY1 + 1, z, pack(wall, 1.0f, jitter(x, kArenaY1 + 1, z)));
+        }
+    }
+    for (int y = kArenaY0 - 1; y <= kArenaY1 + 1; ++y) {
+        for (int z = kRoofZ; z < kArenaFloorZ; ++z) {
+            map.set(kArenaX0 - 1, y, z, pack(wall, 1.0f, jitter(kArenaX0 - 1, y, z)));
+            map.set(kArenaX1 + 1, y, z, pack(wall, 1.0f, jitter(kArenaX1 + 1, y, z)));
+        }
+    }
+    if (scenario == static_cast<int>(Scenario::Gridshot)) {
+        // The stands: three steps, each higher than the one before.
+        for (int s = 0; s < kStandCount; ++s) {
+            const int top = kArenaFloorZ - kStandRise[s];
+            for (int x = kStandX[s]; x < kStandX[s] + kStandDepth; ++x)
+                for (int y = kStandY0; y <= kStandY1; ++y)
+                    for (int z = top; z < kArenaFloorZ; ++z)
+                        map.set(x, y, z, pack(z == top ? stand_top : stand, 1.0f, jitter(x, y, z)));
+        }
+    }
+    if (scenario == static_cast<int>(Scenario::LongRange)) {
+        for (int lx : kFarLaneX)
+            for (int y = static_cast<int>(kFarLaneY0); y <= static_cast<int>(kFarLaneY1); ++y)
+                map.set(lx, y, kArenaFloorZ, pack(lane, 1.0f, 0));
+    }
 }
 
 }  // namespace host

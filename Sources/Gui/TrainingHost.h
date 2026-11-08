@@ -23,6 +23,8 @@
 #include <memory>
 #include <string>
 
+#include <Training/TrainingModes.h>
+
 namespace spades {
 	namespace gui {
 
@@ -43,9 +45,28 @@ namespace spades {
 
 			static TrainingHost& Get();
 
+			/** What a start runs: the tutorial, or an aim scenario with this
+			 * weapon (0 rifle, 1 SMG, 2 shotgun), its targets outlined if
+			 * `highlight`. */
+			struct Launch {
+				training::Mode mode = training::Mode::Tutorial;
+				training::Scenario scenario = training::Scenario::Gridshot;
+				int weapon = 0;
+				bool highlight = false;
+			};
+
 			/** Starts the course's server on its thread. Returns an error
 			 * message, or "". */
-			std::string Start();
+			std::string Start(const Launch& launch = Launch());
+
+			/** What the running server was started with. */
+			const Launch& GetLaunch() const { return launch; }
+			bool IsAim() { return IsActive() && launch.mode == training::Mode::Aim; }
+
+			/** The aim run as the server has it now. */
+			training::AimStatus GetAimStatus();
+			/** Asks for another run of the scenario, from its countdown. */
+			void RestartAim();
 			/** Stops it and waits for its thread, normally well under a second. */
 			void Stop();
 
@@ -67,6 +88,7 @@ namespace spades {
 			struct Impl;
 			std::unique_ptr<Impl> impl;
 			int port = 0;
+			Launch launch;
 		};
 	} // namespace gui
 } // namespace spades

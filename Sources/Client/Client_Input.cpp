@@ -402,6 +402,10 @@ namespace spades {
 				return;
 			}
 
+			// An aim run over: the jump key starts another.
+			if (AimRestartKey(down && CheckKey(cg_keyJump, name)))
+				return;
+
 			if (name == "Escape") {
 				if (down) {
 					if (inGameLimbo) {

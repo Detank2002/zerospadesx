@@ -37,6 +37,7 @@
 #include <cmath>
 
 #include "Client.h"
+#include <Training/TrainingModes.h>
 
 #include <Core/Bitmap.h>
 #include <Core/Settings.h>
@@ -491,6 +492,8 @@ namespace spades {
 				vrRig.wristTriggerOwned = false;
 
 			vrRig.wristMenu = !menu && world && fs.wristShown && fs.wristExpanded;
+			if (!menu && world && fs.wristShown)
+				MarkTrainingVRStep(training::VRStepWrist);
 			vrRig.wristPointing = false;
 			int hover = -1;
 			Vector2 uv;
@@ -734,20 +737,7 @@ namespace spades {
 			const float pad = 12.0F * k;
 
 			// Words to lines of at most 396 layout pixels.
-			std::vector<std::string> lines(1);
-			size_t i = 0;
-			while (i < tip.size()) {
-				size_t j = tip.find(' ', i);
-				if (j == std::string::npos)
-					j = tip.size();
-				const std::string word = tip.substr(i, j - i);
-				const std::string tryLine = lines.back().empty() ? word : lines.back() + " " + word;
-				if (!lines.back().empty() && font.Measure(tryLine).x > 396.0F)
-					lines.push_back(word);
-				else
-					lines.back() = tryLine;
-				i = j + 1;
-			}
+			std::vector<std::string> lines = WrapTipText(font, tip, 396.0F);
 			const float lh = font.Measure("Ag").y;
 			const float boxH = (lh * (float)lines.size() + 24.0F + lh) * k;
 			const AABB2 box(c.x - halfW, c.y - boxH * 0.5F, halfW * 2.0F, boxH);
@@ -886,6 +876,8 @@ namespace spades {
 			}
 
 			vrRig.twoHanded = hold;
+			if (hold)
+				MarkTrainingVRStep(training::VRStepTwoHands);
 			if (hold && !was) {
 				ApplyVRTwoHandedAim();
 				VRPulse(oh, 0.5F, 0.05F);
@@ -1023,7 +1015,9 @@ namespace spades {
 				// into the body, as far as the walls allow.
 				Vector3 offset = MakeVector3(fs.head.position.x - vrRig.anchorX, 0.0F,
 				                             fs.head.position.z - vrRig.anchorZ);
-				if ((int)vr_roomScale && !menu) {
+				// Not in aim training, which is shot from where you stand (a lean
+				// still moves the view, not the body).
+				if ((int)vr_roomScale && !menu && !gui::TrainingHost::Get().IsAim()) {
 					Vector3 moved = p.VRPushBody(VRToWorld(offset));
 					// Back into tracking space: undo the yaw, the axes and the scale.
 					float c = std::cos(-vrRig.bodyYaw), sn = std::sin(-vrRig.bodyYaw);
@@ -1511,6 +1505,7 @@ namespace spades {
 			const int take = VRGripUpdate(vrRig.grip, T.squeeze > 0.7F, slot);
 			if (take >= 0 && p.IsToolSelectable(holstered[take])) {
 				SetSelectedTool(holstered[take]);
+				MarkTrainingVRStep(training::VRStepHolster);
 				VRPulse(toolHand, 0.6F, 0.06F);
 			}
 			VRSetKey(cg_keyAltAttack, vrRig.grip.action && !p.IsToolWeapon());
@@ -1521,6 +1516,8 @@ namespace spades {
 			// back from amber (ClientPlayer): the sound alone was not enough.
 			{
 				const bool reloading = p.IsToolWeapon() && p.GetWeapon().IsReloading();
+				if (vrRig.wasReloading && !reloading && p.IsToolWeapon())
+					MarkTrainingVRStep(training::VRStepReload);
 				if (vrRig.wasReloading && !reloading && p.IsToolWeapon())
 					VRPulse(toolHand, 0.5F, 0.06F);
 				vrRig.wasReloading = reloading;

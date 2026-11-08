@@ -39,6 +39,7 @@ namespace spades {
 			std::string error;
 			std::atomic<bool> stop{false};
 			std::thread thread;
+			std::shared_ptr<training::AimShared> aim = std::make_shared<training::AimShared>();
 
 			void Join() {
 				if (thread.joinable()) {
@@ -78,8 +79,27 @@ namespace spades {
 			impl->state = State::Stopped;
 		}
 
-		std::string TrainingHost::Start() {
+		training::AimStatus TrainingHost::GetAimStatus() {
+			std::lock_guard<std::mutex> lock(impl->aim->mutex);
+			return impl->aim->status;
+		}
+
+		void TrainingHost::RestartAim() {
+			std::lock_guard<std::mutex> lock(impl->aim->mutex);
+			impl->aim->restart = true;
+		}
+
+		std::string TrainingHost::Start(const Launch& what) {
 			Stop();
+			launch = what;
+			{
+				// A new run: nothing of the last one shows.
+				std::lock_guard<std::mutex> lock(impl->aim->mutex);
+				impl->aim->status = training::AimStatus{};
+				impl->aim->status.scenario = what.scenario;
+				impl->aim->status.weapon = what.weapon;
+				impl->aim->restart = false;
+			}
 			{
 				std::lock_guard<std::mutex> lock(impl->mutex);
 				impl->state = State::Starting;
@@ -92,9 +112,14 @@ namespace spades {
 			impl->stop = false;
 			Impl* self = impl.get();
 			const int listenPort = port;
-			impl->thread = std::thread([self, listenPort]() {
+			const Launch run = what;
+			impl->thread = std::thread([self, listenPort, run]() {
 				host::HostConfig cfg;
 				cfg.port = static_cast<uint16_t>(listenPort);
+				cfg.mode = run.mode;
+				cfg.scenario = run.scenario;
+				cfg.highlight_targets = run.highlight;
+				cfg.aim = self->aim;
 				cfg.log = [](const std::string& line) { SPLog("[Training] %s", line.c_str()); };
 				try {
 					host::Server server(cfg);

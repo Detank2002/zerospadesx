@@ -857,7 +857,12 @@ namespace spades {
 			if (!trainingJoined && world && net && !world->GetLocalPlayer() && time > 1.0F &&
 			    gui::TrainingHost::Get().IsActive()) {
 				trainingJoined = true;
-				net->SendJoin(0, RIFLE_WEAPON, playerName, 0);
+				// The tutorial with a rifle; an aim scenario with the weapon it
+				// was started with.
+				gui::TrainingHost& host = gui::TrainingHost::Get();
+				const int w = host.IsAim() ? host.GetLaunch().weapon : 0;
+				net->SendJoin(0, w == 1 ? SMG_WEAPON : w == 2 ? SHOTGUN_WEAPON : RIFLE_WEAPON,
+				              playerName, 0);
 			}
 
 			fpsCounter.MarkFrame();
@@ -953,6 +958,7 @@ namespace spades {
 			if (world) {
 				float gameplayDt = isDemoMode ? dt * demoNet->GetSpeed() : dt;
 				UpdateWorld(dt, gameplayDt);
+				UpdateTraining(dt);
 				mumbleLink.Update(world->GetLocalPlayer().get_pointer());
 			} else {
 				renderer->SetFogColor(MakeVector3(0, 0, 0));

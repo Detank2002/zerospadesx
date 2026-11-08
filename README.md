@@ -14,8 +14,16 @@ makes it; ZeroSpades X follows its `vulkan-2` branch.
 * **Meta Quest 3, standalone**: the `quest3.apk` from a release, sideloaded
   (`adb install -r ZeroSpadesX-<version>-quest3.apk`). It installs over the
   earlier ZeroSpades VR / ZeroSpades X builds and keeps your settings.
-* **Training**: a course on your own machine, from the home screen, to learn
-  the controls (VR or not) against moving targets. No server needed.
+* **Training**, on your own machine, no server needed:
+  * **Tutorial**: a course to learn the controls (VR or not): the range,
+    digging, building and grenades. A ping shows where to go next, and a
+    checklist and timer track your progress (with extra steps in a headset).
+  * **Aim training**: 60-second scenarios in an arena of their own. Gridshot,
+    Flick, Tracking, Strafe duel and Long range, with a rifle, SMG or shotgun.
+    A countdown, the clock, kills, accuracy and score on screen, results at
+    the end with headshots and time to kill, and your best scores kept.
+    Targets can be outlined. Jump (A in VR) goes again.
+  * Ammo, grenades and blocks never run out in either.
 * **Everyone sees VR players**: on servers running `Server/vr_presence.py`,
   VR players' heads, hands and guns are drawn for every ZeroSpades X player,
   on a monitor or in a headset.

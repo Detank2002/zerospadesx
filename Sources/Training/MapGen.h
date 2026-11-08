@@ -21,4 +21,8 @@ void generate_map(VoxelMap& map, uint32_t seed);
 // laid out the same every time. `map` should be empty.
 void generate_training_map(VoxelMap& map);
 
+// The aim arena (TrainingModes.h) beside the course, laid out for `scenario`
+// (a training::Scenario): stands for Gridshot, lanes for Long range.
+void generate_aim_arena(VoxelMap& map, int scenario);
+
 }  // namespace host

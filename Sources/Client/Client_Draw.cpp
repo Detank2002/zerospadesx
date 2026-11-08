@@ -2568,6 +2568,8 @@ namespace spades {
 		}
 
 		bool Client::TrainingTip(bool vr, std::string& title, std::string& tip) {
+			if (AimTip(vr, title, tip))
+				return true;
 			if (!world || !IsOnTrainingCourse())
 				return false;
 			stmp::optional<Player&> p = world->GetLocalPlayer();
@@ -2686,27 +2688,41 @@ namespace spades {
 					               gun);
 					break;
 			}
+			tip += "\n\n" + TrainingChecklist(vr);
 			return true;
+		}
+
+		std::vector<std::string> Client::WrapTipText(IFont& font, const std::string& text,
+		                                             float width) {
+			// Words to lines of at most `width`; a newline always breaks one,
+			// and two make an empty line.
+			std::vector<std::string> lines(1);
+			size_t i = 0;
+			while (i < text.size()) {
+				if (text[i] == '\n') {
+					lines.emplace_back();
+					++i;
+					continue;
+				}
+				size_t j = text.find_first_of(" \n", i);
+				if (j == std::string::npos)
+					j = text.size();
+				const std::string word = text.substr(i, j - i);
+				const std::string tryLine = lines.back().empty() ? word : lines.back() + " " + word;
+				if (!lines.back().empty() && font.Measure(tryLine).x > width)
+					lines.push_back(word);
+				else
+					lines.back() = tryLine;
+				i = j < text.size() && text[j] == ' ' ? j + 1 : j;
+			}
+			return lines;
 		}
 
 		void Client::DrawTipBox(const std::string& title, const std::string& text, Vector4 accent,
 		                        Vector2 at, float layoutW, float k) {
 			IFont& font = fontManager->GetGuiFont();
 			const float inner = layoutW - 24.0F;
-			std::vector<std::string> lines(1);
-			size_t i = 0;
-			while (i < text.size()) {
-				size_t j = text.find(' ', i);
-				if (j == std::string::npos)
-					j = text.size();
-				const std::string word = text.substr(i, j - i);
-				const std::string tryLine = lines.back().empty() ? word : lines.back() + " " + word;
-				if (!lines.back().empty() && font.Measure(tryLine).x > inner)
-					lines.push_back(word);
-				else
-					lines.back() = tryLine;
-				i = j + 1;
-			}
+			std::vector<std::string> lines = WrapTipText(font, text, inner);
 			const float lh = font.Measure("Ag").y;
 			const float pad = 12.0F * k;
 			const float boxW = layoutW * k;

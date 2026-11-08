@@ -19,6 +19,8 @@
 #include <memory>
 #include <string>
 
+#include "TrainingModes.h"
+
 namespace host {
 
 struct HostConfig {
@@ -32,6 +34,14 @@ struct HostConfig {
     int max_players = 32;
     // Where the server's log lines go; nowhere if empty.
     std::function<void(const std::string&)> log;
+    // The tutorial, or an aim scenario in the arena.
+    training::Mode mode = training::Mode::Tutorial;
+    training::Scenario scenario = training::Scenario::Gridshot;
+    // Aim: outline the targets (a Teamplay mark), through walls too.
+    bool highlight_targets = false;
+    // Aim: the run's status for the HUD, and its restart requests. Shared with
+    // the game, which runs this server on a thread of its own.
+    std::shared_ptr<training::AimShared> aim;
 };
 
 class Server {

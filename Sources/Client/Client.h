@@ -27,6 +27,7 @@
 #include <string>
 #include <tuple>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1020,8 +1021,42 @@ namespace spades {
 			 * `layoutW` and drawn `scale` times its size, its top centre at `at`. */
 			void DrawTipBox(const std::string& title, const std::string& text, Vector4 accent,
 			                Vector2 at, float layoutW, float scale);
+			/** A tip's text in lines of at most `width`, breaking at newlines too. */
+			static std::vector<std::string> WrapTipText(IFont& font, const std::string& text,
+			                                            float width);
 			const GameMap* trainingCheckedMap = nullptr;
 			bool trainingCourse = false;
+
+			// Training (Client_Training.cpp): the tutorial's steps done (bits of
+			// training::Step, and of training::VRStep in a headset), its time,
+			// and the aim run as last seen, with its result against the best.
+			int trainingSteps = 0, trainingVRSteps = 0;
+			float trainingTime = 0.0F;
+			bool trainingStarted = false, trainingFinished = false, trainingNewBest = false;
+			float trainingPreviousBest = -1.0F;
+			int aimRunSeen = -1;
+			bool aimResultSaved = false, aimNewBest = false;
+			float aimPreviousBest = -1.0F;
+			void UpdateTraining(float dt);
+			/** The checklist under the course's tips: done steps and the time. */
+			std::string TrainingChecklist(bool vr);
+			/** The aim run for the tip box: the countdown, the clock and the
+			 * score, or the results. False when no scenario is running. */
+			bool AimTip(bool vr, std::string& title, std::string& tip);
+			/** The key that starts another run once one is over; true if taken. */
+			bool AimRestartKey(bool jumpPressed);
+
+		public:
+			/** Training's best scores (TrainingBests.txt): "aim <scenario>
+			 * <weapon>" to the score, "tutorial <vr>" to the seconds. */
+			static std::map<std::string, float> ReadTrainingBests();
+			static void WriteTrainingBests(const std::map<std::string, float>& bests);
+			/** A VR step of the tutorial done (training::VRStep). */
+			void MarkTrainingVRStep(int step);
+			/** A scenario's name, as the menu and the HUD show it. */
+			static std::string AimScenarioName(int scenario);
+
+		private:
 			/** The comfort vignette, drawn in the eye being drawn. */
 			void DrawVRVignette();
 			Handle<IImage> vrVignetteImage;

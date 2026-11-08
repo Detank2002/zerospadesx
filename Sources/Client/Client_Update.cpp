@@ -685,6 +685,14 @@ namespace spades {
 					winp.secondary = aimingDownSight;
 			}
 
+			// Aim training is shot from where you stand, as a range is: turning,
+			// aiming, crouching and jumping, but no walking up to the targets.
+			if (gui::TrainingHost::Get().IsAim()) {
+				inp.moveForward = inp.moveBackward = false;
+				inp.moveLeft = inp.moveRight = false;
+				inp.sprint = false;
+			}
+
 			// set player input
 			player.SetInput(inp);
 			player.SetWeaponInput(winp);

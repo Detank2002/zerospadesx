@@ -32,6 +32,8 @@
 #include <Core/Strings.h>
 #include <Gui/MainScreenHelper.h>
 #include <Gui/TrainingHost.h>
+#include <Client/Client.h>
+#include <Training/TrainingModes.h>
 #include <Gui/ModsScreenHelper.h>
 #include <Gui/OfficialMods.h>
 #include <Gui/UpdateChecker.h>
@@ -49,6 +51,12 @@ DEFINE_SPADES_SETTING(cg_serverlistSort, "16385");
 // For tests: start Training the first time the main menu shows, as a headset
 // with no command line has no other way to be put straight into a game.
 DEFINE_SPADES_SETTING(cg_debugStartTraining, "0");
+// Aim training's gun (0 rifle, 1 SMG, 2 shotgun) and whether its targets are
+// outlined, as last picked on Training's page.
+DEFINE_SPADES_SETTING(cg_aimWeapon, "0");
+DEFINE_SPADES_SETTING(cg_aimHighlight, "0");
+// For tests: -1, or an aim scenario to start the first time the menu shows.
+DEFINE_SPADES_SETTING(cg_debugStartAim, "-1");
 
 namespace spades {
 	namespace gui {
@@ -692,7 +700,7 @@ namespace spades {
 					std::function<void()> action;
 				};
 				std::vector<Entry> entries;
-				entries.push_back({_Tr("MainScreen", "Training"), [this] { StartTraining(); }});
+				entries.push_back({_Tr("MainScreen", "Training"), [this] { ShowTraining(); }});
 				entries.push_back({_Tr("MainScreen", "Multiplayer"), [this] { ShowTab(0); }});
 				entries.push_back({_Tr("MainScreen", "Demos"), [this] { ShowTab(1); }});
 				if (!helper->IsTryingMod())
@@ -720,6 +728,65 @@ namespace spades {
 					y += bh + gap;
 				}
 			}
+			// Training's page, the home screen's first button.
+			{
+				Handle<TabPanel> panelH = Handle<TabPanel>::New(manager);
+				trainingPanel = panelH.GetPointerOrNull();
+				trainingPanel->SetBounds(AABB2(0.0F, 0.0F, sw, sh));
+				AddChild(trainingPanel);
+
+				const float bw = std::min(520.0F, sw - 32.0F);
+				const float x = (sw - bw) * 0.5F;
+				const float bh = std::max(26.0F, std::min(36.0F, (sh - tabStripPos - 40.0F) / 13.0F));
+				const float gap = 6.0F;
+				float y = tabStripPos;
+				auto label = [&](const std::string& text, float h, Vector4 color) {
+					Handle<Label> l = Handle<Label>::New(manager);
+					l->text = text;
+					l->textColor = color;
+					l->alignment = MakeVector2(0.0F, 0.5F);
+					l->SetBounds(AABB2(x, y, bw, h));
+					trainingPanel->AddChild(l.GetPointerOrNull());
+					y += h;
+				};
+				auto button = [&](float bx, float w, std::function<void()> action) {
+					Handle<Button> b = Handle<Button>::New(manager);
+					b->SetBounds(AABB2(bx, y, w, bh));
+					b->activated = [action](UIElement&) { action(); };
+					trainingPanel->AddChild(b.GetPointerOrNull());
+					return b.GetPointerOrNull();
+				};
+
+				tutorialButton = button(x, bw, [this] { StartTraining(); });
+				y += bh + 2.0F;
+				label(_Tr("MainScreen", "The course: moving, shooting, digging, building and "
+				                        "grenades, with a checklist and a timer."),
+				      22.0F, MakeVector4(0.8F, 0.8F, 0.8F, 1.0F));
+				y += 10.0F;
+				label(_Tr("MainScreen", "Aim training: 60 seconds a run"), 26.0F,
+				      MakeVector4(1.0F, 0.85F, 0.3F, 1.0F));
+				for (int i = 0; i < training::kScenarioCount; i++) {
+					scenarioButtons.push_back(button(x, bw, [this, i] { StartAimScenario(i); }));
+					y += bh + gap;
+				}
+				y += 4.0F;
+				const float third = (bw - 2.0F * gap) / 3.0F;
+				for (int w = 0; w < 3; w++) {
+					weaponButtons.push_back(button(x + (third + gap) * w, third, [this, w] {
+						cg_aimWeapon = w;
+						RefreshTrainingPanel();
+					}));
+				}
+				y += bh + gap;
+				highlightButton = button(x, bw, [this] {
+					cg_aimHighlight = (int)cg_aimHighlight ? 0 : 1;
+					RefreshTrainingPanel();
+				});
+				y += bh + gap * 2.0F;
+				ui::Button* back = button(x, bw, [this] { ShowHome(); });
+				back->caption = _Tr("MainScreen", "Back");
+			}
+
 			ShowHome();
 			// Coming back from an apply-triggered relaunch: open the Mods tab.
 			if (helper->ShouldOpenModsTab())
@@ -758,8 +825,76 @@ namespace spades {
 			currentDemoListModel = model;
 		}
 
+		void MainScreenMainMenu::ShowTraining() {
+			homePanel->visible = false;
+			trainingPanel->visible = true;
+			RefreshTrainingPanel();
+		}
+
+		void MainScreenMainMenu::RefreshTrainingPanel() {
+			const auto bests = client::Client::ReadTrainingBests();
+			auto best = [&](const std::string& key) -> float {
+				auto it = bests.find(key);
+				return it == bests.end() ? -1.0F : it->second;
+			};
+			auto clock = [](float sec) {
+				const int s = static_cast<int>(sec + 0.5F);
+				return std::to_string(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + std::to_string(s % 60);
+			};
+			{
+				const float t = best("tutorial 0"), tvr = best("tutorial 1");
+				std::string caption = _Tr("MainScreen", "Tutorial");
+				if (t >= 0.0F || tvr >= 0.0F) {
+					caption += "   (" + _Tr("MainScreen", "best") + " ";
+					if (t >= 0.0F)
+						caption += clock(t);
+					if (tvr >= 0.0F)
+						caption += (t >= 0.0F ? ", VR " : "VR ") + clock(tvr);
+					caption += ")";
+				}
+				tutorialButton->caption = caption;
+			}
+			const int weapon = std::min(std::max((int)cg_aimWeapon, 0), 2);
+			static const char* const blurbs[] = {
+			  "three targets on stands", "one at a time, anywhere", "keep your aim on it",
+			  "strafing targets, full health", "walkers far away"};
+			for (int i = 0; i < (int)scenarioButtons.size(); i++) {
+				std::string caption = client::Client::AimScenarioName(i) + ": " +
+				                      _Tr("MainScreen", blurbs[i]);
+				const float b = best("aim " + std::to_string(i) + " " + std::to_string(weapon));
+				if (b >= 0.0F) {
+					char buf[32];
+					if (training::scored_on_tracking(static_cast<training::Scenario>(i)))
+						std::snprintf(buf, sizeof(buf), "%.0f%%", b / 100.0F);
+					else
+						std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(b));
+					caption += "   (" + _Tr("MainScreen", "best") + " " + buf + ")";
+				}
+				scenarioButtons[i]->caption = caption;
+			}
+			const std::string names[3] = {_Tr("MainScreen", "Rifle"), _Tr("MainScreen", "SMG"),
+			                              _Tr("MainScreen", "Shotgun")};
+			for (int w = 0; w < 3; w++)
+				weaponButtons[w]->caption = w == weapon ? "> " + names[w] + " <" : names[w];
+			highlightButton->caption = (int)cg_aimHighlight
+			                             ? _Tr("MainScreen", "Highlight targets: on")
+			                             : _Tr("MainScreen", "Highlight targets: off");
+		}
+
+		void MainScreenMainMenu::StartAimScenario(int scenario) {
+			TrainingHost::Launch launch;
+			launch.mode = training::Mode::Aim;
+			launch.scenario = static_cast<training::Scenario>(
+			  std::min(std::max(scenario, 0), training::kScenarioCount - 1));
+			launch.weapon = std::min(std::max((int)cg_aimWeapon, 0), 2);
+			launch.highlight = (int)cg_aimHighlight != 0;
+			StartTraining(launch);
+		}
+
 		void MainScreenMainMenu::ShowHome() {
 			homePanel->visible = true;
+			if (trainingPanel)
+				trainingPanel->visible = false;
 			tabStrip->visible = false;
 			for (UIElement* e : tabFooter)
 				e->visible = false;
@@ -770,6 +905,8 @@ namespace spades {
 
 		void MainScreenMainMenu::ShowTab(int index) {
 			homePanel->visible = false;
+			if (trainingPanel)
+				trainingPanel->visible = false;
 			tabStrip->visible = true;
 			for (UIElement* e : tabFooter)
 				e->visible = true;
@@ -789,7 +926,7 @@ namespace spades {
 
 		MainScreenMainMenuState MainScreenMainMenu::GetState() {
 			MainScreenMainMenuState state;
-			if (homePanel->visible)
+			if (homePanel->visible || (trainingPanel && trainingPanel->visible))
 				state.activeTabIndex = -1;
 			else if (serverPanel->visible)
 				state.activeTabIndex = 0;
@@ -1314,7 +1451,7 @@ namespace spades {
 
 		void MainScreenMainMenu::HotKey(const std::string& key) {
 			if (IsEnabled() && key == "Enter") {
-				if (homePanel->visible) {
+				if (homePanel->visible || trainingPanel->visible) {
 					// Nothing is selected on the home screen.
 				} else if (demoPanel->visible) {
 					PlaySelectedDemo();
@@ -1331,10 +1468,10 @@ namespace spades {
 			}
 		}
 
-		void MainScreenMainMenu::StartTraining() {
+		void MainScreenMainMenu::StartTraining(const TrainingHost::Launch& launch) {
 			if (trainingStarting)
 				return;
-			std::string msg = TrainingHost::Get().Start();
+			std::string msg = TrainingHost::Get().Start(launch);
 			if (!msg.empty()) {
 				Handle<AlertScreen> al = Handle<AlertScreen>::New(this, msg, 200.0F, true);
 				al->Run();
@@ -1384,6 +1521,11 @@ namespace spades {
 				debugTrainingStarted = true;
 				StartTraining();
 			}
+			static bool debugAimStarted = false;
+			if ((int)cg_debugStartAim >= 0 && !debugAimStarted) {
+				debugAimStarted = true;
+				StartAimScenario((int)cg_debugStartAim);
+			}
 			// Whichever page is up: the course started from the home screen is
 			// waited for and joined from here.
 			PollTraining();
@@ -1392,6 +1534,8 @@ namespace spades {
 				                            ? _Tr("MainScreen", "Starting the course...")
 				                            : _Tr("MainScreen", "Training");
 			}
+			if (trainingStarting && tutorialButton)
+				tutorialButton->caption = _Tr("MainScreen", "Starting...");
 			UIElement::Render();
 
 			// check for client error message.

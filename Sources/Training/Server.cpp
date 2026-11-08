@@ -6,6 +6,7 @@
 #include "Protocol.h"
 #include "SolidMap.h"
 #include "TrainingCourse.h"
+#include "TrainingModes.h"
 #include "Vec3.h"
 #include "VoxelMap.h"
 
@@ -23,6 +24,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <random>
 #include <thread>
@@ -96,6 +98,8 @@ constexpr int kClipTolerance = 10;
 struct Gun {
     int type = 0;
     int ammo = 10, stock = 50;
+    // Rounds fired, ever, for the aim scenarios' accuracy (see fired_by).
+    int fired = 0;
     bool shoot = false, reloading = false;
     double shoot_time = 0, next_shot = 0, reload_at = 0;
 
@@ -124,8 +128,16 @@ struct Gun {
             const int before = ammo;
             ammo = get_ammo(now, true);
             next_shot = shoot_time + spec().delay * (before - ammo);
+            // No more than the magazine held: a trigger held on an empty one
+            // fires nothing.
+            fired += std::min(std::max(0, before), std::max(0, before - ammo));
         }
         shoot = v;
+    }
+    // Rounds fired by `now`, those of a trigger still held included.
+    int fired_by(double now) const {
+        if (!shoot) return fired;
+        return fired + std::min(std::max(0, ammo), std::max(0, ammo - get_ammo(now, true)));
     }
     void reload(double now) {
         if (reloading) return;
@@ -253,6 +265,25 @@ struct Player {
     bool to_far = true;      // which end of the lane it is walking to
     bool ext_teamplay = false;
     bool ext_flashlight = false;   // claimed Flashlight (0x32)
+
+    // Aim: a target of the scenario, which the server moves itself.
+    bool aim_bot = false;
+    int far_lane = -1;             // Long range's lane
+    bool has_spawn_at = false;     // where it comes back: a ground voxel
+    Vec3 spawn_at{};
+    double appeared_at = 0;        // when it last spawned, for the time to kill
+    double respawn_delay = 0;
+    int strafe = 0;                // -1, 0 or 1: which way it is stepping
+    double strafe_until = 0, next_jump = 0, recover_at = 0;
+    float home_y = 0;
+    // A person: when they were last restocked, and the shot their last hit
+    // belonged to (a shotgun's pellets arrive together).
+    double last_restock = -1e9;
+    double last_hit_at = -1e9;
+    bool head_this_shot = false;
+    // Tutorial: the steps done (bits of training::Step) and the one pinged.
+    int steps_done = 0;
+    int pinged_step = -1;
     bool lamp = false;             // its flashlight is lit
 
     bool spectator() const { return team == -1; }
@@ -291,6 +322,13 @@ struct Server::Impl {
     uint64_t job_rev = 0;
     std::shared_ptr<const std::vector<uint8_t>> job_result;
     const uint32_t team_color[2] = {0x0000C4, 0x00C400};
+
+    // Aim: the run as the server keeps it; published to cfg.aim every tick.
+    training::AimStatus aim;
+    double phase_until = 0;
+    int shots_base = 0;          // the person's rounds fired when the run began
+    int bot_count = 0;
+    double next_tutorial_check = 0;
     const uint32_t fog = 0x80E8FF;
 
     void log(const char* fmt, ...) {
@@ -353,8 +391,10 @@ struct Server::Impl {
     // --- the map ----------------------------------------------------------
     void load_map() {
         generate_training_map(map);
+        generate_aim_arena(map, static_cast<int>(cfg.scenario));
         map.to_solid_map(phys_map);
     }
+    bool aim_mode() const { return cfg.mode == training::Mode::Aim; }
     void serve_maps() {
         if (job_running && job_done.load()) {
             map_job.join();
@@ -430,7 +470,7 @@ struct Server::Impl {
             if (players[i]) ++count;
             else if (id < 0) id = i;
         }
-        if (id < 0 || count >= cfg.max_players + training::kLaneCount) {
+        if (id < 0 || count >= cfg.max_players + bot_count) {
             enet_peer_disconnect(peer, kErrorFull);
             return;
         }
@@ -531,8 +571,28 @@ struct Server::Impl {
         p.gun.restock();
     }
 
+    // Training never runs out: a person nearly out of reserve ammo, grenades or
+    // blocks is given more (Restock: health, grenades, blocks and reserve to
+    // full on the client too). Only when nearly out, since a restock plays its
+    // sound; not in the middle of a reload, which carries on with what it had.
+    void keep_stocked(Player& p) {
+        if (!p.peer || !p.alive || p.aim_bot || p.gun.reloading) return;
+        const bool low = p.gun.stock <= p.gun.spec().clip || p.grenades <= 0 || p.blocks <= 10;
+        if (!low || world_time - p.last_restock < 1.5) return;
+        p.last_restock = world_time;
+        refill(p);
+        ByteWriter bw;
+        bw.write_u8(static_cast<uint8_t>(PacketId::Restock));
+        bw.write_u8(static_cast<uint8_t>(p.id));
+        send(p, bw);
+    }
+
     // A target on its lane of the range, a person at the start.
     Vec3 spawn_location(Player& p) {
+        if (p.aim_bot && p.has_spawn_at) return p.spawn_at;
+        if (aim_mode() && !p.aim_bot)
+            return Vec3{static_cast<float>(training::kAimSpawnX), static_cast<float>(training::kAimSpawnY),
+                        static_cast<float>(map.get_z(training::kAimSpawnX, training::kAimSpawnY))};
         if (p.lane >= 0) {
             const int x = training::kLaneX[p.lane];
             return Vec3{static_cast<float>(x), 256.0f, static_cast<float>(map.get_z(x, 256))};
@@ -571,9 +631,16 @@ struct Server::Impl {
         bw.write_cstring(p.name);
         broadcast(bw, true);
         if (!p.client_info) send_handshake(p);
+        p.appeared_at = world_time;
+        if (p.aim_bot) {
+            p.home_y = p.body.pos.y;
+            p.strafe_until = 0;
+            if (cfg.highlight_targets) send_mark(p);
+        }
     }
 
     float respawn_seconds(const Player& p) const {
+        if (p.aim_bot) return static_cast<float>(p.respawn_delay);
         return p.lane >= 0 ? kTargetRespawn : cfg.respawn_sec;
     }
     void schedule_respawn(Player& p) {
@@ -582,6 +649,14 @@ struct Server::Impl {
 
     void kill(Player& p, Player* by, int kill_type) {
         if (!p.alive) return;
+        if (p.aim_bot) {
+            if (by && !by->aim_bot && aim.phase == training::AimPhase::Running) {
+                aim.kills += 1;
+                aim.ttk_sum += static_cast<float>(world_time - p.appeared_at);
+                aim.ttk_count += 1;
+            }
+            place_aim_bot(p, true);
+        }
         p.alive = false;
         p.hp = 0;
         p.gun.reset();
@@ -650,6 +725,316 @@ struct Server::Impl {
         p.input.mf = true;
     }
 
+    // --- the aim scenarios --------------------------------------------------
+    Player* person() {
+        for (auto& pp : players)
+            if (pp && pp->peer && pp->playing()) return pp.get();
+        return nullptr;
+    }
+    float uniform(float a, float b) { return std::uniform_real_distribution<float>(a, b)(rng); }
+    int bots_for(training::Scenario sc) const {
+        switch (sc) {
+            case training::Scenario::Gridshot: return 3;
+            case training::Scenario::Flick: return 1;
+            case training::Scenario::Tracking: return 1;
+            case training::Scenario::StrafeDuel: return 2;
+            case training::Scenario::LongRange: return training::kFarLaneCount;
+            default: return 1;
+        }
+    }
+    void add_aim_bots() {
+        const int n = bots_for(cfg.scenario);
+        for (int k = 0; k < n; ++k) {
+            int id = -1;
+            for (int i = 0; i < kSlots && id < 0; ++i)
+                if (!players[i]) id = i;
+            if (id < 0) return;
+            auto p = std::make_unique<Player>();
+            p->id = id;
+            p->named = true;
+            p->name = "Target " + std::to_string(k + 1);
+            p->team = kTargets;
+            p->aim_bot = true;
+            if (cfg.scenario == training::Scenario::LongRange) p->far_lane = k;
+            p->client_info = true;
+            players[id] = std::move(p);
+            ++bot_count;
+            place_aim_bot(*players[id], false);
+            spawn(*players[id]);
+        }
+    }
+    // A ground voxel at `x`, `y` in the arena, kept off its walls.
+    Vec3 arena_ground(float fx, float fy) {
+        const int x = std::min(std::max(static_cast<int>(fx), training::kArenaX0 + 2), training::kArenaX1 - 2);
+        const int y = std::min(std::max(static_cast<int>(fy), training::kArenaY0 + 2), training::kArenaY1 - 2);
+        return Vec3{static_cast<float>(x), static_cast<float>(y), static_cast<float>(map.get_z(x, y))};
+    }
+    // Somewhere around the player's spot: `deg` either side of straight ahead,
+    // between `d0` and `d1` blocks out.
+    Vec3 arena_arc(float deg, float d0, float d1) {
+        const float a = uniform(-deg, deg) * 3.14159265f / 180.0f, d = uniform(d0, d1);
+        return arena_ground(training::kAimSpawnX + std::cos(a) * d, training::kAimSpawnY + std::sin(a) * d);
+    }
+    bool clear_of_bots(const Player& self, const Vec3& at, float gap) {
+        for (auto& pp : players) {
+            if (!pp || pp.get() == &self || !pp->aim_bot || !pp->alive) continue;
+            if (std::fabs(pp->body.pos.x - at.x) < gap && std::fabs(pp->body.pos.y - at.y) < gap) return false;
+        }
+        return true;
+    }
+    // Where an aim target comes back, and after how long; `pinged` sends the
+    // spot ahead of it in Flick.
+    void place_aim_bot(Player& p, bool pinged) {
+        using training::Scenario;
+        Vec3 at{};
+        double delay = 0.0;
+        for (int tries = 0; tries < 20; ++tries) {
+            switch (cfg.scenario) {
+                case Scenario::Gridshot: {
+                    const int st = std::uniform_int_distribution<int>(0, training::kStandCount - 1)(rng);
+                    at = arena_ground(uniform(training::kStandX[st] + 1.0f,
+                                              training::kStandX[st] + training::kStandDepth - 1.0f),
+                                      uniform(training::kStandY0 + 1.0f, training::kStandY1 - 1.0f));
+                    break;
+                }
+                case Scenario::Flick: at = arena_arc(70.0f, 10.0f, 32.0f); break;
+                case Scenario::Tracking: at = arena_ground(training::kAimSpawnX + 20.0f, training::kAimSpawnY); break;
+                case Scenario::StrafeDuel: at = arena_arc(45.0f, 15.0f, 35.0f); break;
+                case Scenario::LongRange:
+                    at = arena_ground(static_cast<float>(training::kFarLaneX[std::max(0, p.far_lane)]),
+                                      uniform(training::kFarLaneY0, training::kFarLaneY1));
+                    break;
+                default: at = arena_arc(45.0f, 15.0f, 30.0f); break;
+            }
+            if (clear_of_bots(p, at, 3.0f)) break;
+        }
+        switch (cfg.scenario) {
+            case Scenario::Gridshot: delay = 0.0; break;
+            case Scenario::Flick: delay = uniform(0.35f, 0.7f); break;
+            case Scenario::StrafeDuel: delay = 0.6; break;
+            case Scenario::LongRange: delay = 1.0; break;
+            default: delay = 0.5; break;
+        }
+        p.spawn_at = at;
+        p.has_spawn_at = true;
+        p.respawn_delay = delay;
+        if (pinged && cfg.scenario == Scenario::Flick)
+            send_ping(Vec3{at.x + 0.5f, at.y + 0.5f, at.z - 1.5f}, static_cast<float>(delay) + 0.2f, 0xFF9020, "");
+    }
+    // The aim targets' own minds: still, strafing and jumping, or walking.
+    void steer_aim_bot(Player& p) {
+        using training::Scenario;
+        p.input = physics::Input{};
+        const Player* who = person();
+        // Facing the player, always.
+        if (who) {
+            float dx = who->body.pos.x - p.body.pos.x, dy = who->body.pos.y - p.body.pos.y;
+            const float l = std::sqrt(dx * dx + dy * dy);
+            if (l > 1e-3f) p.body.ori = Vec3{dx / l, dy / l, 0.0f};
+        }
+        switch (cfg.scenario) {
+            case Scenario::Tracking:
+            case Scenario::StrafeDuel: {
+                if (world_time >= p.strafe_until) {
+                    const float stop = cfg.scenario == Scenario::StrafeDuel ? 0.3f : 0.1f;
+                    p.strafe = uniform(0.0f, 1.0f) < stop ? 0 : (uniform(0.0f, 1.0f) < 0.5f ? -1 : 1);
+                    p.strafe_until = world_time + uniform(0.35f, 1.4f);
+                }
+                // Back towards where it started when it strays too far: whichever
+                // way it steps, turned round if that takes it further out.
+                const float off = p.body.pos.y - p.home_y;
+                // Judged now and then, as a turn takes the body a moment.
+                if (std::fabs(off) > 9.0f && world_time >= p.recover_at) {
+                    if (p.strafe == 0) p.strafe = 1;
+                    else if ((off > 0.0f) == (p.body.vel.y > 0.0f)) p.strafe = -p.strafe;
+                    p.strafe_until = world_time + 0.6;
+                    p.recover_at = world_time + 0.4;
+                }
+                p.input.ml = p.strafe < 0;
+                p.input.mr = p.strafe > 0;
+                if (world_time >= p.next_jump) {
+                    p.input.jump = p.body.vel.z >= 0 && p.body.vel.z < 0.017f;
+                    p.next_jump = world_time + uniform(1.5f, 4.0f);
+                }
+                break;
+            }
+            case Scenario::LongRange: {
+                const float end = p.to_far ? training::kFarLaneY1 : training::kFarLaneY0;
+                if (std::fabs(p.body.pos.y - end) < 0.75f) p.to_far = !p.to_far;
+                p.body.ori = Vec3{0.0f, end > p.body.pos.y ? 1.0f : -1.0f, 0.0f};
+                p.input.mf = true;
+                break;
+            }
+            default: break;  // still
+        }
+    }
+    // Whether `who` is looking at `t`: their view's ray passing within a body's
+    // half width of it, from the eye down to the knees.
+    static bool aimed_at(const Player& who, const Player& t) {
+        const Vec3& o = who.body.pos;
+        const Vec3& d = who.body.ori;
+        for (int i = 0; i <= 4; ++i) {
+            const Vec3 c{t.body.pos.x, t.body.pos.y, t.body.pos.z + 0.45f * static_cast<float>(i)};
+            const Vec3 v{c.x - o.x, c.y - o.y, c.z - o.z};
+            const float along = v.x * d.x + v.y * d.y + v.z * d.z;
+            if (along <= 0.0f) continue;
+            const Vec3 q{v.x - d.x * along, v.y - d.y * along, v.z - d.z * along};
+            if (q.x * q.x + q.y * q.y + q.z * q.z < 0.6f * 0.6f) return true;
+        }
+        return false;
+    }
+    void reset_run() {
+        const int run = aim.run + 1;
+        aim = training::AimStatus{};
+        aim.scenario = cfg.scenario;
+        aim.run = run;
+        aim.phase = training::AimPhase::Waiting;
+        for (auto& pp : players) {
+            if (!pp || !pp->aim_bot) continue;
+            place_aim_bot(*pp, false);
+            if (pp->alive) {
+                pp->alive = false;   // back at a fresh spot at once, without a kill
+                spawn(*pp);
+            } else {
+                pp->respawn_at = world_time;
+            }
+        }
+    }
+    void aim_tick(float dt) {
+        using training::AimPhase;
+        // The client's restart, or a run nobody is left to play.
+        bool restart = false;
+        if (cfg.aim) {
+            std::lock_guard<std::mutex> lk(cfg.aim->mutex);
+            restart = cfg.aim->restart;
+            cfg.aim->restart = false;
+        }
+        Player* who = person();
+        if (restart) {
+            reset_run();
+            if (who && who->alive) spawn(*who);  // back on the spot
+        }
+        if (!who && aim.phase != AimPhase::Waiting) reset_run();
+        switch (aim.phase) {
+            case AimPhase::Waiting:
+                if (who && who->alive) {
+                    aim.phase = AimPhase::Countdown;
+                    aim.weapon = who->weapon;
+                    phase_until = world_time + training::kCountdownSeconds;
+                }
+                break;
+            case AimPhase::Countdown:
+                aim.countdown = static_cast<float>(std::max(0.0, phase_until - world_time));
+                if (world_time >= phase_until) {
+                    aim.phase = AimPhase::Running;
+                    phase_until = world_time + training::kRunSeconds;
+                    shots_base = who ? who->gun.fired_by(world_time) : 0;
+                    // The targets' clocks start with the run.
+                    for (auto& pp : players)
+                        if (pp && pp->aim_bot) pp->appeared_at = world_time;
+                }
+                break;
+            case AimPhase::Running:
+                aim.elapsed += dt;
+                aim.time_left = static_cast<float>(std::max(0.0, phase_until - world_time));
+                if (who) {
+                    aim.shots = std::max(0, who->gun.fired_by(world_time) - shots_base);
+                    if (who->alive && cfg.scenario == training::Scenario::Tracking) {
+                        for (auto& pp : players)
+                            if (pp && pp->aim_bot && pp->alive && aimed_at(*who, *pp)) {
+                                aim.on_target += dt;
+                                break;
+                            }
+                    }
+                }
+                if (world_time >= phase_until) {
+                    aim.phase = AimPhase::Finished;
+                    aim.time_left = 0.0f;
+                    log("aim run %d over: %d kills, %d of %d shots hit", aim.run, aim.kills, aim.hits, aim.shots);
+                }
+                break;
+            case AimPhase::Finished: break;
+        }
+        if (cfg.aim) {
+            std::lock_guard<std::mutex> lk(cfg.aim->mutex);
+            cfg.aim->status = aim;
+        }
+    }
+
+    // --- Teamplay from the server: pings and marks --------------------------
+    void send_ping(const Vec3& at, float duration, uint32_t rgb, const std::string& reason) {
+        ByteWriter bw;
+        bw.write_u8(static_cast<uint8_t>(PacketId::Teamplay));
+        bw.write_u8(1);                       // Ping
+        bw.write_u8(255);                     // the server's own
+        bw.write_vec(at);
+        bw.write_f32(duration);
+        bw.write_u8(1 | 2);                   // in the world and on the minimap
+        write_color(bw, rgb);
+        bw.write_u8(0);
+        for (char ch : reason) bw.write_u8(static_cast<uint8_t>(ch));
+        for (auto& o : players)
+            if (o && o->peer && !o->loading && o->ext_teamplay) send(*o, bw);
+    }
+    void send_mark(const Player& target) {
+        ByteWriter bw;
+        bw.write_u8(static_cast<uint8_t>(PacketId::Teamplay));
+        bw.write_u8(2);                       // ESP Mark
+        bw.write_u8(static_cast<uint8_t>(target.id));
+        bw.write_f32(std::numeric_limits<float>::infinity());
+        bw.write_u8(1);                       // the body's outline
+        bw.write_u8(0);
+        write_color(bw, 0x20FF60);
+        bw.write_u8(0);
+        for (auto& o : players)
+            if (o && o->peer && !o->loading && o->ext_teamplay) send(*o, bw);
+    }
+
+    // --- the tutorial's pings: where the next step is -------------------------
+    void tutorial_tick() {
+        if (world_time < next_tutorial_check) return;
+        next_tutorial_check = world_time + 0.25;
+        using namespace training;
+        for (auto& pp : players) {
+            if (!pp || !pp->peer || !pp->playing() || !pp->ext_teamplay) continue;
+            Player& p = *pp;
+            for (int st = 0; st < StepCount; ++st)
+                if (p.alive && step_reached(st, p.body.pos.x, p.kills)) p.steps_done |= 1 << st;
+            int next = -1;
+            for (int st = 0; st < StepCount && next < 0; ++st)
+                if (!(p.steps_done & (1 << st))) next = st;
+            if (next == p.pinged_step) continue;
+            p.pinged_step = next;
+            struct Goal { float x, z; const char* what; };
+            const float up = static_cast<float>(kFloorZ - kLedgeRise);
+            const Goal goals[StepCount] = {
+              {static_cast<float>(kRange.x0 + 6), kFloorZ - 1.0f, "Walk to the range"},
+              {static_cast<float>(kLaneX[0]), kFloorZ - 2.5f, "Shoot 3 targets"},
+              {static_cast<float>(kDigWall.x0), kFloorZ - 2.0f, "Dig through"},
+              {static_cast<float>(kLedgeX + 1), up - 1.0f, "Build up here"},
+              {static_cast<float>(kPlug.x0), up - 1.5f, "Blow it open"},
+              {static_cast<float>(kFinish.x0 + 6), up - 1.0f, "Finish"},
+            };
+            ByteWriter bw;
+            bw.write_u8(static_cast<uint8_t>(PacketId::Teamplay));
+            bw.write_u8(1);
+            bw.write_u8(255);
+            if (next < 0) {
+                bw.write_vec(Vec3{0, 0, 0});
+                bw.write_f32(0.0f);           // all done: no more ping
+            } else {
+                bw.write_vec(Vec3{goals[next].x, 256.5f, goals[next].z});
+                bw.write_f32(std::numeric_limits<float>::infinity());
+            }
+            bw.write_u8(1 | 2);
+            write_color(bw, 0xFFC830);
+            bw.write_u8(0);
+            if (next >= 0)
+                for (const char* c = goals[next].what; *c; ++c) bw.write_u8(static_cast<uint8_t>(*c));
+            send(p, bw);
+        }
+    }
+
     // --- the world --------------------------------------------------------
     void world_tick() {
         const float dt = static_cast<float>(kTick);
@@ -670,6 +1055,8 @@ struct Server::Impl {
             }
             if (!p.playing()) continue;
             if (p.lane >= 0) steer_target(p);
+            if (p.aim_bot) steer_aim_bot(p);
+            keep_stocked(p);
             p.input.holding_gun = p.tool == kToolWeapon;
             p.input.secondary_fire = p.secondary;
             const physics::StepResult r = physics::step(phys_map, p.body, p.input, dt);
@@ -678,6 +1065,8 @@ struct Server::Impl {
             if (!p.alive) continue;
             if (p.body.pos.z > 64.0f || !finite3(p.body.pos)) kill(p, nullptr, kFallKill);
         }
+        if (aim_mode()) aim_tick(dt);
+        else tutorial_tick();
         for (size_t i = 0; i < grenades.size();) {
             if (world_time >= grenades[i].explode_at) {
                 const Grenade g = grenades[i];
@@ -994,6 +1383,11 @@ struct Server::Impl {
             send(p, bw);
         }
         spawn(p);
+        // The targets' outlines, for one who joins after they were placed.
+        if (cfg.highlight_targets)
+            for (auto& o : players)
+                if (o && o->aim_bot && o->alive) send_mark(*o);
+        p.pinged_step = -1;   // the tutorial's next goal, pinged again
     }
 
     void on_hit(Player& p, ByteReader& br) {
@@ -1014,6 +1408,28 @@ struct Server::Impl {
             amount = p.gun.spec().damage[value];
         }
         const int kill_type = melee ? kMeleeKill : value == kHead ? kHeadshotKill : kWeaponKill;
+        if (victim.aim_bot) {
+            // Only the run's own hits count, and only the run's targets take them.
+            if (aim.phase != training::AimPhase::Running) return;
+            if (!melee) {
+                // A shot's pellets arrive together: one hit per shot, and one
+                // headshot if any of them was.
+                if (world_time - p.last_hit_at > 0.03) {
+                    aim.hits += 1;
+                    p.head_this_shot = false;
+                }
+                p.last_hit_at = world_time;
+                if (value == kHead && !p.head_this_shot) {
+                    aim.headshots += 1;
+                    p.head_this_shot = true;
+                }
+            }
+            if (cfg.scenario == training::Scenario::Tracking) return;  // it never falls
+            if (training::one_shot(cfg.scenario)) {
+                kill(victim, &p, kill_type);
+                return;
+            }
+        }
         hit(victim, amount, &p, kill_type);
     }
 
@@ -1133,7 +1549,10 @@ struct Server::Impl {
         if (text.size() > 108) text.resize(108);
         if (!text.empty() && text[0] == '/') {
             if (text == "/kill" && p.alive) kill(p, nullptr, kFallKill);
-            else system_chat("Commands here: /kill", p.id);
+            else if (text == "/restart" && aim_mode()) {
+                reset_run();
+                if (p.alive) spawn(p);
+            } else system_chat(aim_mode() ? "Commands here: /restart, /kill" : "Commands here: /kill", p.id);
             return;
         }
         const bool all = type == static_cast<int>(proto::ChatType::All);
@@ -1283,7 +1702,13 @@ bool Server::start(std::string& err) {
     if (enet_initialize() != 0) { err = "cannot start networking"; return false; }
     s.enet_up = true;
     s.load_map();
-    s.add_targets();
+    if (s.aim_mode()) {
+        s.aim.scenario = s.cfg.scenario;
+        s.add_aim_bots();
+    } else {
+        s.add_targets();
+        s.bot_count = training::kLaneCount;
+    }
     s.map_cache = std::make_shared<const std::vector<uint8_t>>(s.map.save_compressed());
     s.cache_rev = s.map_rev;
     ENetAddress addr;

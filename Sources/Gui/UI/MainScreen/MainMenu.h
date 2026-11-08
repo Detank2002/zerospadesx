@@ -30,6 +30,7 @@
 #include <Gui/UI/Widgets/Field.h>
 #include <Gui/UI/Widgets/Label.h>
 #include <Gui/UI/Widgets/TabStrip.h>
+#include <Gui/TrainingHost.h>
 
 namespace spades {
 	namespace gui {
@@ -159,7 +160,20 @@ namespace spades {
 			bool trainingStarting = false;
 			/** When the course's server was started, to give up on it in time. */
 			double trainingStartedAt = 0.0;
-			void StartTraining();
+			/** Starts the tutorial, or an aim scenario. */
+			void StartTraining(const TrainingHost::Launch& launch = TrainingHost::Launch());
+
+			// Training's page: the tutorial, and the aim scenarios with the gun
+			// and the highlight they run with. Captions carry the best scores,
+			// so they are filled in each time it is shown.
+			TabPanel* trainingPanel = nullptr;
+			ui::Button* tutorialButton = nullptr;
+			std::vector<ui::Button*> scenarioButtons;
+			std::vector<ui::Button*> weaponButtons;
+			ui::Button* highlightButton = nullptr;
+			void ShowTraining();
+			void RefreshTrainingPanel();
+			void StartAimScenario(int scenario);
 			/** Joins the course once its server listens, or says why it did not. */
 			void PollTraining();
 			ui::SimpleTabStrip* tabStrip = nullptr;

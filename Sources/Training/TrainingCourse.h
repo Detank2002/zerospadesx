@@ -61,4 +61,21 @@ constexpr Station station_at(float x) {
                                   : Finish;
 }
 
+// The tutorial's steps (TrainingModes.h), from where a player is along the
+// corridor and how many of the range's targets they have downed. Each step is
+// done for good once this says so; the checklist and the server's pings keep
+// that themselves. Position only: past the dig wall it was dug, standing past
+// the ledge's face it was climbed, past the plug it was blown open.
+constexpr bool step_reached(int step, float x, int range_kills) {
+    switch (step) {
+        case 0: return x >= kRange.x0;                // StepWalk
+        case 1: return range_kills >= 3;              // StepShoot (kRangeKills)
+        case 2: return x > kDigWall.x1 + 1;           // StepDig
+        case 3: return x >= kLedgeX + 1;              // StepClimb
+        case 4: return x > kPlug.x1 + 1;              // StepBlast
+        case 5: return x >= kFinish.x0;               // StepFinish
+        default: return false;
+    }
+}
+
 }  // namespace training
