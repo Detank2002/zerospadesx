@@ -231,35 +231,42 @@ namespace spades {
 			UpdateChecker::Result result = UpdateChecker::Get().GetResult();
 			const bool selfUpdate = SelfUpdater::IsSupported();
 			std::string text =
-			  selfUpdate
-			    ? _Tr("MainScreen",
-			          "A new version of ZeroSpades X is available!\n\n"
-			          "Installed version: {0}\nLatest version: {1}\n\n"
-			          "Update now? It downloads while you stay in the menu; then click the "
-			          "banner at the top to restart into it.",
-			          ReleaseVersion::Current().ToString(), result.latestVersion.ToString())
-			    : _Tr("MainScreen",
-			          "A new version of ZeroSpades X is available!\n\n"
-			          "Installed version: {0}\nLatest version: {1}\n\n"
-			          "Open the release page to download it? ZeroSpades X will close so the "
-			          "update can be installed.",
-			          ReleaseVersion::Current().ToString(), result.latestVersion.ToString());
+			  _Tr("MainScreen", "A new version of ZeroSpades X is available!\n\n"
+			                    "Installed version: {0}\nLatest version: {1}",
+			      ReleaseVersion::Current().ToString(), result.latestVersion.ToString());
+			// What it brings, from the release's notes: a reason to update now.
+			float height = kPromptHeight;
+			if (!result.changes.empty()) {
+				text += "\n\n" + _Tr("MainScreen", "What's new:");
+				for (const std::string& change : result.changes)
+					text += "\n- " + change;
+				height += 22.0F * static_cast<float>(result.changes.size() + 2);
+			}
+			text += "\n\n";
+			text += selfUpdate
+			          ? _Tr("MainScreen",
+			                "Update now? It downloads while you stay in the menu; then click the "
+			                "banner at the top to restart into it.")
+			          : _Tr("MainScreen",
+			                "Open the release page to download it? ZeroSpades X will close so the "
+			                "update can be installed.");
 
 			Handle<UpdatePromptScreen> prompt = Handle<UpdatePromptScreen>::New(
 			  owner, text, result.releaseUrl, result.latestTag, selfUpdate,
-			  std::move(releasePageOpened));
+			  std::move(releasePageOpened), height);
 			prompt->Run();
 		}
 
 		UpdatePromptScreen::UpdatePromptScreen(ui::UIElement* owner, const std::string& text,
 		                                       const std::string& releaseUrl,
 		                                       const std::string& releaseTag, bool selfUpdate,
-		                                       std::function<void()> releasePageOpened)
+		                                       std::function<void()> releasePageOpened,
+		                                       float height)
 		    : MessageBoxScreen(owner, text,
 		                       {selfUpdate ? _Tr("MainScreen", "Update Now")
 		                                   : _Tr("MainScreen", "Open Release Page"),
 		                        _Tr("MainScreen", "Later")},
-		                       kPromptHeight, true) {
+		                       height, true) {
 			closed = [releaseUrl, releaseTag, selfUpdate,
 			          releasePageOpened](ui::UIElement& sender) {
 				if (static_cast<UpdatePromptScreen&>(sender).resultIndex != 0)

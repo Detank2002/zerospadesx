@@ -105,6 +105,40 @@ int main() {
 	Check(UpdateAssetName("v0.3.1", "windows-x64") == "ZeroSpadesX-v0.3.1-windows-x64.zip",
 	      "the asset's name");
 
+	// A release's What's new, as release.yml writes its notes and GitHub
+	// appends its own
+	{
+		const std::string body =
+		  "## What's new\r\n"
+		  "- Aim training with **scores**\r\n"
+		  "- See [the page](https://example.com/x) for `more`\r\n"
+		  "\r\n"
+		  "## Downloads\r\n"
+		  "* **ZeroSpadesX-v1.zip**: for Windows\r\n"
+		  "## What's Changed\r\n"
+		  "* a commit by someone\r\n";
+		const auto c = ReleaseChanges(body);
+		Check(c.size() == 2, "two changes");
+		Check(c.size() > 0 && c[0] == "Aim training with scores", "emphasis dropped");
+		Check(c.size() > 1 && c[1] == "See the page for more", "a link's words, code marks dropped");
+		Check(ReleaseChanges("## Downloads\n- x\n").empty(), "no section, nothing");
+		Check(ReleaseChanges("").empty(), "no notes, nothing");
+		Check(ReleaseChanges("####\n- x\n").empty(), "a bare heading");
+		Check(ReleaseChanges("### WHAT\xE2\x80\x99S NEW\n- curly\n").size() == 1,
+		      "a curly apostrophe, any case");
+		std::string many = "## What's new\n";
+		for (int i = 0; i < 10; ++i)
+			many += "- line " + std::to_string(i) + "\n";
+		Check(ReleaseChanges(many).size() == 6, "six at most");
+		const auto longOne =
+		  ReleaseChanges("## What's new\n- " + std::string(200, 'a') + " tail\n", 6, 40);
+		Check(longOne.size() == 1 && longOne[0].size() <= 40 &&
+		        longOne[0].compare(longOne[0].size() - 3, 3, "...") == 0,
+		      "a long line cut");
+		Check(ReleaseChanges("## What's new\n- a\x01" "b\x1b[31m\n")[0] == "ab[31m",
+		      "control characters dropped");
+	}
+
 	// The paths
 	Check(IsSafeUpdatePath("ZeroSpades.exe"), "a plain name");
 	Check(IsSafeUpdatePath("Resources/pak002-Base.pak"), "a name in a folder");

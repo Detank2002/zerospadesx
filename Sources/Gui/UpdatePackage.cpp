@@ -89,6 +89,78 @@ namespace spades {
 			return {};
 		}
 
+		std::vector<std::string> ReleaseChanges(const std::string& notes, std::size_t maxLines,
+		                                        std::size_t maxChars) {
+			std::vector<std::string> out;
+			bool inSection = false;
+			std::size_t start = 0;
+			while (start < notes.size() && out.size() < maxLines) {
+				std::size_t nl = notes.find('\n', start);
+				std::string line =
+				  notes.substr(start, (nl == std::string::npos ? notes.size() : nl) - start);
+				start = nl == std::string::npos ? notes.size() : nl + 1;
+				while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+					line.pop_back();
+
+				if (!line.empty() && line[0] == '#') {
+					// A heading: the section is the one called What's new.
+					const std::size_t from = line.find_first_not_of("# ");
+					std::string title = from == std::string::npos ? std::string() : line.substr(from);
+					std::string lower;
+					for (char c : title)
+						lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+					// "What's new", with a straight or a curly apostrophe
+					const std::size_t news = lower.find("new");
+					inSection = lower.compare(0, 4, "what") == 0 && news != std::string::npos &&
+					            news < 12;
+					continue;
+				}
+				if (!inSection)
+					continue;
+				std::size_t at = line.find_first_not_of(' ');
+				if (at == std::string::npos || (line[at] != '-' && line[at] != '*') ||
+				    at + 1 >= line.size() || line[at + 1] != ' ')
+					continue;
+				line = line.substr(at + 2);
+
+				// Plain text: links as their words, no emphasis or code marks, no
+				// control characters.
+				std::string text;
+				for (std::size_t i = 0; i < line.size(); ++i) {
+					const char c = line[i];
+					if (c == '[') {
+						const std::size_t close = line.find("](", i);
+						const std::size_t end = close == std::string::npos ? close : line.find(')', close);
+						if (end != std::string::npos) {
+							text += line.substr(i + 1, close - i - 1);
+							i = end;
+							continue;
+						}
+					}
+					if (c == '*' || c == '`' || (c == '_' && (i == 0 || line[i - 1] == ' ' || i + 1 == line.size() || line[i + 1] == ' ')))
+						continue;
+					if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F)
+						continue;
+					text.push_back(c);
+				}
+				while (!text.empty() && text.back() == ' ')
+					text.pop_back();
+				if (text.empty())
+					continue;
+				if (text.size() > maxChars) {
+					// Cut at a space, and not inside a UTF-8 character.
+					std::size_t cut = text.rfind(' ', maxChars - 3);
+					if (cut == std::string::npos || cut < maxChars / 2)
+						cut = maxChars - 3;
+					while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
+						--cut;
+					text = text.substr(0, cut) + "...";
+				}
+				out.push_back(text);
+			}
+			return out;
+		}
+
 		bool IsSafeUpdatePath(const std::string& path) {
 			if (path.empty() || path.size() > 200 || path[0] == '/')
 				return false;

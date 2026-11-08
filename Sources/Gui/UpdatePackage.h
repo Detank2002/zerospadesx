@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 // What a release can tell this build about its own package, kept apart from
 // the download so it can be tested without a network.
@@ -69,5 +70,16 @@ namespace spades {
 		 * `..`, no drive or backslash).
 		 */
 		bool IsSafeUpdatePath(const std::string& path);
+
+		/**
+		 * The "What's new" lines of a release's notes (its Markdown body on
+		 * GitHub, which release.yml starts with the version's CHANGELOG.md
+		 * section): the "- " items under a "What's new" heading, as plain text,
+		 * at most `maxLines` of them, each cut to `maxChars`. Empty if the notes
+		 * have no such section. The notes are the server's text, so only plain
+		 * text comes out: no Markdown, no control characters.
+		 */
+		std::vector<std::string> ReleaseChanges(const std::string& notes, std::size_t maxLines = 6,
+		                                        std::size_t maxChars = 90);
 	} // namespace gui
 } // namespace spades

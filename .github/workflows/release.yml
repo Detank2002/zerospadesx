@@ -34,6 +34,12 @@ jobs:
             echo "::error::CMakeLists.txt says $cmake_version; set ZEROSPADES_VERSION_* to ${VERSION#v} first"
             exit 1
           fi
+          # The release's notes start with its CHANGELOG.md section, which the
+          # game shows when it offers the update
+          if [ -z "$(awk -v v="## ${VERSION#v}" '$0 == v {on=1; next} /^## / {on=0} on && /^- /' CHANGELOG.md)" ]; then
+            echo "::error::CHANGELOG.md has no '## ${VERSION#v}' section with '- ' lines"
+            exit 1
+          fi
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
             echo "::error::$VERSION is already tagged"
             exit 1
@@ -133,7 +139,9 @@ jobs:
           signing="$(openssl pkey -pubin -in signing.pub -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n')"
           rm -f signing.pub
           [ "$built_in" = "$signing" ] || { echo "::error::UPDATE_SIGNING_KEY is not the key built into the game"; exit 1; }
-          printf '## Downloads\n%s\nChecksums are in SHA256SUMS, signed in SHA256SUMS.sig by the release key.\n' "$list" > notes.md
+          # What's new first: the game shows these lines when it offers the update
+          changes="$(awk -v v="## ${VERSION#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md | sed '/^[[:space:]]*$/d')"
+          printf "## What's new\n%s\n\n## Downloads\n%s\nChecksums are in SHA256SUMS, signed in SHA256SUMS.sig by the release key.\n" "$changes" "$list" > notes.md
           cat notes.md
 
       - name: Publish

@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace spades {
 	namespace gui {
@@ -73,6 +74,9 @@ namespace spades {
 				ReleaseVersion latestVersion;
 				/** Its tag, e.g. "v0.3.1"; set with `latestVersion`. */
 				std::string latestTag;
+				/** What the release brings, in a few short plain-text lines (its
+				 * notes' "What's new"); may be empty. */
+				std::vector<std::string> changes;
 				/**
 				 * The release page to send the user to; always under the project's
 				 * GitHub releases, whatever the response said.

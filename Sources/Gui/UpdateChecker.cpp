@@ -20,6 +20,7 @@
 
 #include "UpdateChecker.h"
 #include "CurlTls.h"
+#include "UpdatePackage.h"
 
 #include <cctype>
 #include <memory>
@@ -193,6 +194,8 @@ namespace spades {
 				const ReleaseVersion current = ReleaseVersion::Current();
 				r.latestVersion = *latest;
 				r.latestTag = tag;
+				if (root["body"].isString())
+					r.changes = ReleaseChanges(root["body"].asString());
 				r.releaseUrl = std::move(releaseUrl);
 				r.state = current < *latest ? State::UpdateAvailable : State::UpToDate;
 
