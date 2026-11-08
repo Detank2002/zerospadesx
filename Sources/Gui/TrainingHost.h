@@ -39,21 +39,24 @@ namespace spades {
 		 * the one played. Leaving the course stops it, and so does the game
 		 * closing.
 		 */
+		/** What a start of Training runs: the tutorial, or an aim scenario with
+		 * this weapon (0 rifle, 1 SMG, 2 shotgun), its targets outlined if
+		 * `highlight`. Outside TrainingHost, so a default argument can make one
+		 * inside it (GCC and Clang want the initializers complete by then). */
+		struct TrainingLaunch {
+			training::Mode mode = training::Mode::Tutorial;
+			training::Scenario scenario = training::Scenario::Gridshot;
+			int weapon = 0;
+			bool highlight = false;
+		};
+
 		class TrainingHost {
 		public:
 			enum class State { Stopped, Starting, Ready, Failed };
 
 			static TrainingHost& Get();
 
-			/** What a start runs: the tutorial, or an aim scenario with this
-			 * weapon (0 rifle, 1 SMG, 2 shotgun), its targets outlined if
-			 * `highlight`. */
-			struct Launch {
-				training::Mode mode = training::Mode::Tutorial;
-				training::Scenario scenario = training::Scenario::Gridshot;
-				int weapon = 0;
-				bool highlight = false;
-			};
+			using Launch = TrainingLaunch;
 
 			/** Starts the course's server on its thread. Returns an error
 			 * message, or "". */
