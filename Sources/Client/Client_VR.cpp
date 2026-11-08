@@ -474,8 +474,31 @@ namespace spades {
 			b.push_back(
 			  {VRWristButton::Team, 0, AABB2(m + (tw + gap) * 2.0F, qy + 74.0F, tw, 66.0F), {}});
 
-			// No palette (testers: clutter on the watch); X and Y step through the
-			// colours (vr_toolButtons 0).
+			// The flat game's palette (PaletteView, 8 colours): each hue from
+			// dark to light along a row. On the wrist menu, which only opens with
+			// the other hand at the wrist: off the watch (testers found it clutter
+			// there), but the one way left to pick a colour rather than copy one
+			// from a block (a tester could not choose any).
+			static const IntVector3 hues[8] = {{128, 128, 128}, {256, 0, 0},   {256, 128, 0},
+			                                   {256, 256, 0},   {0, 256, 0},   {0, 256, 256},
+			                                   {0, 0, 256},     {256, 0, 256}};
+			const float cx = 500.0F;
+			const float cs = (static_cast<float>(kVRWristCanvasWidth) - m - cx) / 8.0F;
+			for (int r = 0; r < 8; r++) {
+				const IntVector3 col = hues[r];
+				const IntVector3 white = MakeIntVector3(256, 256, 256);
+				for (int j = 0; j < 8; j++) {
+					const int k = (j % 4) * 2 + 1;
+					IntVector3 c = j < 4 ? (col * k) / 8 - 1 : col + ((white - col) * k) / 8 - 1;
+					c.x = std::max(0, c.x);
+					c.y = std::max(0, c.y);
+					c.z = std::max(0, c.z);
+					b.push_back({VRWristButton::Colour, r * 8 + j,
+					             AABB2(cx + static_cast<float>(j) * cs,
+					                   m + static_cast<float>(r) * cs, cs, cs),
+					             c});
+				}
+			}
 			return b;
 		}
 
