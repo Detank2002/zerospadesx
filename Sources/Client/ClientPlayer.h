@@ -175,7 +175,8 @@ namespace spades {
 			 * right, down. */
 			void AddVRBody(const Vector3& headPos, const Vector3 headAxes[3], const bool handValid[2],
 			               const Vector3 handPos[2], const Vector3 handAxes[2][3], int toolHand,
-			               bool drawHead, bool drawUpperArms, const ModelRenderParam& param);
+			               bool drawHead, bool drawUpperArms, const ModelRenderParam& param,
+			               const Matrix4* torso = nullptr);
 			/** The OriginMatrix that puts the current tool's grip in a hand. */
 			Matrix4 VRToolOriginMatrix(const Vector3& handPos, const Vector3 axes[3]);
 

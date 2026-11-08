@@ -99,8 +99,11 @@ namespace spades {
 		namespace {
 			/** `torso` turned about its hips, and moved along itself, so that its
 			 * top is at `neck`. The torso models hang down their +z from the neck;
-			 * `length` is how far down the hips are. */
-			Matrix4 LeanTorsoToNeck(const Matrix4& torso, Vector3 neck, float length) {
+			 * `length` is how far down the hips are. It leans `maxLean` radians at
+			 * most: a back bent further reads as a body lying down (testers), and a
+			 * head that low is a crouch, which the caller poses instead. */
+			Matrix4 LeanTorsoToNeck(const Matrix4& torso, Vector3 neck, float length,
+			                        float maxLean = 3.2F, bool keepLength = false) {
 				const Vector3 top = torso.GetOrigin();
 				const Vector3 hips = top + torso.GetAxis(2) * length;
 
@@ -125,14 +128,24 @@ namespace spades {
 				// The smallest turn taking `from` onto `to` (Rodrigues).
 				Vector3 k = Vector3::Cross(from, to);
 				float s = k.GetLength(), c = Vector3::Dot(from, to);
+				if (std::atan2(s, c) > maxLean) {
+					// The same axis, the angle cut down to the most it may lean.
+					const float len = s;
+					s = std::sin(maxLean);
+					c = std::cos(maxLean);
+					k = len > 1.0E-6F ? k * (s / len) : k;
+				}
 				auto turn = [&](const Vector3& v) {
 					if (s < 1.0E-5F)
 						return v;
 					Vector3 u = k / s;
 					return v * c + Vector3::Cross(u, v) * s + u * (Vector3::Dot(u, v) * (1.0F - c));
 				};
-				return Matrix4::FromAxis(turn(torso.GetAxis(0)), turn(torso.GetAxis(1)),
-				                         turn(torso.GetAxis(2)), neck);
+				// With `keepLength`, its top where the turned torso puts it, under the
+				// neck as near as the lean allows; otherwise at the neck.
+				const Vector3 axis2 = turn(torso.GetAxis(2));
+				return Matrix4::FromAxis(turn(torso.GetAxis(0)), turn(torso.GetAxis(1)), axis2,
+				                         keepLength ? hips - axis2 * length : neck);
 			}
 
 			/**
@@ -1402,7 +1415,19 @@ namespace spades {
 			Matrix4 const scaler = Matrix4::Scale(0.1F)
 				* Matrix4::Scale(-1, -1, 1);
 
-			PlayerInput const inp = p.GetInput();
+			PlayerInput inp = p.GetInput();
+
+			// A VR player who ducks in their room, with their head well under a
+			// standing body's neck, is drawn crouching: bending the torso down to
+			// such a head laid it flat (testers). The game's own crouch stays what
+			// the server knows.
+			if (vrPose && !inp.crouch) {
+				Vector3 headDown = vrPose->headRotation.Rotate(MakeVector3(0, 0, 1));
+				const float neckZ = (p.GetEye() + vrPose->headOffset + headDown * 0.2F).z;
+				const float standingNeckZ = origin.z - TorsoHeight(false);
+				if (neckZ - standingNeckZ > 0.35F) // z is down
+					inp.crouch = true;
+			}
 
 			float const legsPosX = 0.25F;
 			float const legsPosY = inp.crouch ? 0.25F : 0.0F;
@@ -1480,7 +1505,7 @@ namespace spades {
 				Vector3 headDown = vrPose->headRotation.Rotate(MakeVector3(0, 0, 1));
 				// Where AddVRBody hangs the head model from.
 				Vector3 neck = p.GetEye() + vrPose->headOffset + headDown * 0.2F;
-				torso = LeanTorsoToNeck(torso, neck, inp.crouch ? 0.5F : 0.7F);
+				torso = LeanTorsoToNeck(torso, neck, inp.crouch ? 0.5F : 0.7F, DEG2RAD(25.0F), true);
 			}
 
 			Matrix4 const head = torso
@@ -1539,7 +1564,7 @@ namespace spades {
 				}
 				int toolHand = (vrPose->flags & VRPoseToolInLeftHand) ? VRHandLeft : VRHandRight;
 				AddVRBody(eye + vrPose->headOffset, headAxes, handValid, handPos, handAxes, toolHand,
-				          true, true, param);
+				          true, true, param, &torso);
 			} else {
 				// Arms
 				{
@@ -1699,7 +1724,8 @@ namespace spades {
 		void ClientPlayer::AddVRBody(const Vector3& headPos, const Vector3 headAxes[3],
 		                             const bool handValid[2], const Vector3 handPos[2],
 		                             const Vector3 handAxes[2][3], int toolHand, bool drawHead,
-		                             bool drawUpperArms, const ModelRenderParam& baseParam) {
+		                             bool drawUpperArms, const ModelRenderParam& baseParam,
+		                             const Matrix4* torso) {
 			IRenderer& renderer = client.GetRenderer();
 			std::string modelPath = "Models/Player/";
 			if (!cg_classicPlayerModels)
@@ -1718,8 +1744,9 @@ namespace spades {
 				                        ? renderer.RegisterModel("Models/Player/XmasHat.kv6")
 				                        : renderer.RegisterModel(ModelPart(modelPath, "Head").c_str());
 				// The head model hangs off the neck, 0.2 below the eyes, the same as
-				// the ordinary animation puts it.
-				Vector3 neck = headPos + headAxes[2] * 0.2F;
+				// the ordinary animation puts it; on a drawn body, on its torso's top,
+				// so the head stays on the shoulders whatever the lean left over.
+				Vector3 neck = torso ? torso->GetOrigin() : headPos + headAxes[2] * 0.2F;
 				const Matrix4 headFrame =
 				  Matrix4::FromAxis(-headAxes[1], headAxes[0], headAxes[2], neck);
 				param.matrix = headFrame * Matrix4::Scale(0.1F);
@@ -1735,14 +1762,26 @@ namespace spades {
 
 			int armMode = drawUpperArms ? 2 : (int)vr_showArms;
 			if (armMode > 0) {
-				Handle<IModel> foreModel = renderer.RegisterModel(ModelPart(modelPath, "Arm").c_str());
+				// On a drawn body (another player) the sleeve and the hand apart, so
+				// the hand turns with the controller, and as thick as the body's
+				// own parts; your own first-person arms as they were.
+				const bool body = torso != nullptr;
+				Handle<IModel> foreModel = renderer.RegisterModel(
+				  ModelPart(modelPath, body ? "Forearm" : "Arm").c_str());
 				Handle<IModel> upperModel =
 				  renderer.RegisterModel(ModelPart(modelPath, "UpperArm").c_str());
+				Handle<IModel> handModel;
+				if (body)
+					handModel = renderer.RegisterModel(ModelPart(modelPath, "Hand").c_str());
 				const float upperLen = 0.55F, foreLen = 0.55F;
+				const float thick = body ? 0.08F : 0.05F;
 
 				// The arm models run up +z from their origin, as in the first-person
-				// view; the left one is the right one mirrored.
-				auto armMatrix = [](const Vector3& from, const Vector3& to, bool leftArm) {
+				// view; the left one is the right one mirrored. On a body each is
+				// drawn the length from `from` to `to` (`voxels` long as made), so an
+				// arm reaches its hand however far the tracking puts it.
+				auto armMatrix = [&](const Vector3& from, const Vector3& to, bool leftArm,
+				                     float voxels) {
 					Vector3 a2 = to - from;
 					float len = a2.GetLength();
 					a2 = len > 1.0E-4F ? a2 / len : MakeVector3(0, 0, 1);
@@ -1751,7 +1790,8 @@ namespace spades {
 						a1 = Vector3::Cross(a2, MakeVector3(1, 0, 0));
 					a1 = a1.Normalize();
 					Vector3 a0 = Vector3::Cross(a1, a2).Normalize();
-					Matrix4 m = Matrix4::FromAxis(a0, a1, a2, from) * Matrix4::Scale(0.05F);
+					const float along = body ? std::max(len, 0.05F) / voxels : 0.05F;
+					Matrix4 m = Matrix4::FromAxis(a0, a1, a2, from) * Matrix4::Scale(thick, thick, along);
 					if (leftArm)
 						m = m * Matrix4::Translate(0, -1, 0) * Matrix4::Scale(1, -1, 1);
 					return m;
@@ -1763,8 +1803,12 @@ namespace spades {
 					bool left = h == VRHandLeft;
 					Vector3 wrist = handPos[h] - handAxes[h][0] * 0.08F;
 					Vector3 elbow;
+					// The shoulder: at the top corner of the drawn torso, or, with
+					// none, beside where the head is.
 					Vector3 shoulder =
-					  headPos + down * 0.55F + right * (left ? -0.33F : 0.33F) - fwd * 0.08F;
+					  torso ? torso->GetOrigin() + torso->GetAxis(0) * (left ? -0.42F : 0.42F) +
+					            torso->GetAxis(2) * 0.15F
+					        : headPos + down * 0.55F + right * (left ? -0.33F : 0.33F) - fwd * 0.08F;
 
 					if (armMode >= 2) {
 						// Two bones from a shoulder beside the head, the elbow bent
@@ -1787,11 +1831,23 @@ namespace spades {
 						elbow = wrist + back * foreLen;
 					}
 
-					param.matrix = armMatrix(elbow, wrist, left);
+					param.matrix = armMatrix(elbow, wrist, left, body ? 9.0F : 12.0F);
 					renderer.RenderModel(*foreModel, param);
 					if (armMode >= 2) {
-						param.matrix = armMatrix(shoulder, elbow, left);
+						param.matrix = armMatrix(shoulder, elbow, left, 12.0F);
 						renderer.RenderModel(*upperModel, param);
+					}
+					if (handModel) {
+						// The hand as the controller holds it: its length along the
+						// controller's forward, centred a little ahead of the wrist.
+						const Vector3* ax = handAxes[h];
+						const Vector3 at = wrist + ax[0] * 0.1F;
+						Matrix4 m = Matrix4::FromAxis(ax[2], ax[1], ax[0], at) *
+						            Matrix4::Scale(thick, thick, 0.07F);
+						if (left)
+							m = m * Matrix4::Translate(0, -1, 0) * Matrix4::Scale(1, -1, 1);
+						param.matrix = m;
+						renderer.RenderModel(*handModel, param);
 					}
 				}
 			}
