@@ -13,6 +13,9 @@ one change, in a player's words.
 - Ammo, grenades and blocks never run out in Training
 - VR players crouch instead of folding over, with thicker arms and hands that turn
 - VR: the kill feed is back, in front of you
+- VR: block colours can be picked on the wrist menu again
+- A mod that breaks the scripts is turned off, so it can always be unticked
+- The update prompt shows what the new version brings
 
 ## 0.3.2
 
