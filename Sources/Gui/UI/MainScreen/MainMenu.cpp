@@ -1110,13 +1110,32 @@ namespace spades {
 			if (modsDownloading)
 				return;
 			std::string error;
-			switch (helper->ApplyMods(error)) {
+			const ModApplyResult result = helper->ApplyMods(error);
+			// Mods turned off on the way, their scripts not building: said first,
+			// and before a restart once it is read.
+			auto turnedOff = [this, &error](std::function<void()> then) {
+				Handle<AlertScreen> al = Handle<AlertScreen>::New(
+				  this,
+				  _Tr("MainScreen", "Turned off, as their scripts don't build:") + " " + error,
+				  240.0F, true);
+				if (then)
+					al->closed = [then](UIElement&) { then(); };
+				al->Run();
+			};
+			switch (result) {
 				case ModApplyResult::Applied:
 					modsDirty = false;
 					LoadModList();
 					modsStatusLabel->text = _Tr("MainScreen", "Mods applied.");
+					if (!error.empty())
+						turnedOff(nullptr);
 					break;
-				case ModApplyResult::NeedsRestart: helper->RelaunchForMods(); break;
+				case ModApplyResult::NeedsRestart:
+					if (error.empty())
+						helper->RelaunchForMods();
+					else
+						turnedOff([this] { helper->RelaunchForMods(); });
+					break;
 				case ModApplyResult::Refused: {
 					// The previous set is enabled again, so nothing is pending.
 					modsDirty = false;

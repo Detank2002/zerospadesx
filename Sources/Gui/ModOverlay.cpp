@@ -112,26 +112,79 @@ namespace spades {
 			std::vector<std::string> previous = g_mountedMods;
 			auto before = GetWinners();
 			Mount();
-			auto after = GetWinners();
 
-			ResourceChanges changes;
-			for (const auto& file : before) {
-				auto it = after.find(file.first);
-				if (it == after.end() || it->second != file.second)
-					changes.Add(file.first);
-			}
-			for (const auto& file : after) {
-				if (before.find(file.first) == before.end())
-					changes.Add(file.first);
+			auto changesSince = [&before]() {
+				auto after = GetWinners();
+				ResourceChanges changes;
+				for (const auto& file : before) {
+					auto it = after.find(file.first);
+					if (it == after.end() || it->second != file.second)
+						changes.Add(file.first);
+				}
+				for (const auto& file : after) {
+					if (before.find(file.first) == before.end())
+						changes.Add(file.first);
+				}
+				return changes;
+			};
+			ResourceChanges changes = changesSince();
+
+			// Build the new scripts first: ones that don't build would also stop
+			// the next start. A mod whose scripts break the build is turned off,
+			// and the rest applied, so a broken mod can always be unticked and
+			// never holds the others back (a tester could not untick one). Each
+			// mod is tried out of the set, the last enabled first; with none that
+			// mends it alone, the last is dropped and the search goes on.
+			std::string notice;
+			if (changes.ContainsUnder("Scripts")) {
+				ScriptManager& scripts = *ScriptManager::GetInstance();
+				error = scripts.CheckScripts();
+				if (!error.empty()) {
+					const std::string firstError = error;
+					std::vector<std::string> set = g_mountedMods, off;
+					while (!error.empty() && !set.empty()) {
+						bool found = false;
+						for (std::size_t i = set.size(); i-- > 0;) {
+							std::vector<std::string> without = set;
+							without.erase(without.begin() + static_cast<long>(i));
+							MountSet(without);
+							if (scripts.CheckScripts().empty()) {
+								off.push_back(set[i]);
+								set = without;
+								error.clear();
+								found = true;
+								break;
+							}
+						}
+						if (!found) {
+							off.push_back(set.back());
+							set.pop_back();
+							MountSet(set);
+							error = scripts.CheckScripts();
+						}
+					}
+					if (!error.empty()) {
+						// Not even without any mod: nothing a mod can mend.
+						SPLog("Mods not applied: %s", error.c_str());
+						Handle<ModsScreenHelper>::New()->SetEnabledMods(previous);
+						MountSet(previous);
+						return ModApplyResult::Refused;
+					}
+					std::string names;
+					for (const std::string& m : off)
+						names += (names.empty() ? "" : ", ") + m;
+					SPLog("Mods turned off, their scripts don't build: %s: %s", names.c_str(),
+					      firstError.c_str());
+					Handle<ModsScreenHelper>::New()->SetEnabledMods(set);
+					MountSet(set);
+					changes = changesSince();
+					notice = names + "\n\n" + firstError;
+				}
 			}
 
 			bool live = changes.GetReloadTime() == ResourceChanges::ReloadTime::Live;
-
-			// Build the new scripts first. Ones that don't build would also stop the
-			// next start, so go back to the set that was mounted, on disk too.
-			if (changes.ContainsUnder("Scripts")) {
-				ScriptManager& scripts = *ScriptManager::GetInstance();
-				error = live ? scripts.ReloadScripts() : scripts.CheckScripts();
+			if (live && changes.ContainsUnder("Scripts")) {
+				error = ScriptManager::GetInstance()->ReloadScripts();
 				if (!error.empty()) {
 					SPLog("Mods not applied: %s", error.c_str());
 					Handle<ModsScreenHelper>::New()->SetEnabledMods(previous);
@@ -139,6 +192,8 @@ namespace spades {
 					return ModApplyResult::Refused;
 				}
 			}
+			// What was turned off, for the menu to say (any result but Refused).
+			error = notice;
 
 			// What is loaded was built from the previous set, so keep that mounted
 			// until the restart; the enabled set on disk is the new one.
