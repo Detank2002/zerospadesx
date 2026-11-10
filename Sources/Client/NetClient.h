@@ -125,7 +125,7 @@ namespace spades {
 			/** The newest Compact World Update's sequence number, -1 for none yet. */
 			int lastCompactSeq = -1;
 
-						FlashlightBeams flashlightBeams;
+			FlashlightBeams flashlightBeams;
 
 			/** The time of day of the last Sky. It belongs to the connection, not to a
 			 * world, so it lasts through Map Start. */
