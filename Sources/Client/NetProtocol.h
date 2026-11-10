@@ -87,6 +87,7 @@ namespace spades {
 			PacketTypeDaytimeWeather = 115, // S2C, extension id 0x33 (`64 + extension id`)
 			PacketTypePlayerOutfit = 117,   // S2C, extension id 0x35 (`64 + extension id`); see PlayerOutfit.h
 			PacketTypeVRPresence = 122, // C2S2P, extension id 58; see VRNetProtocol.h
+			PacketTypeCompactWorldUpdate = 126, // S2C, extension id 0x3E; see ReadCompactWorldEntry
 		};
 
 		/** Protocol extension ids, as negotiated through `PacketTypeExtensionInfo`. */
@@ -98,6 +99,7 @@ namespace spades {
 			ExtensionTypeFlashlight = 0x32,
 			ExtensionTypeDaytimeWeather = 0x33,
 			ExtensionTypePlayerOutfit = 0x35,
+			ExtensionTypeCompactWorldUpdate = 0x3E, // past ZeroSpades' range (to 0x33) by ten
 			ExtensionTypeVRPresence = 58,
 			ExtensionTypePlayerLimit = 192,
 			ExtensionTypeMessageTypes = 193,
@@ -328,6 +330,50 @@ namespace spades {
 				entry.version = r.ReadByte();
 			}
 			return entries;
+		}
+
+		/** One player in a *Compact World Update* (extension 0x3E, packet 126): what a
+		 * World Update says of a player, in 10 bytes instead of 24, and only for the
+		 * players the server lists. The packet is the type byte, a u16 sequence number
+		 * (little-endian, counting up; an older one arriving after a newer one is
+		 * dropped: the server sends it unsequenced) and then entries:
+		 *   u8 player id;
+		 *   u16 x * 64, u16 y * 64, u16 (z + 128) * 64 (little-endian, 1/64 block);
+		 *   s8 front x * 127, s8 front y * 127, s8 front z * 127 (normalized here).
+		 * A server sends it in place of World Update to a client that took the
+		 * extension, small enough for one unfragmented packet, unreliable and
+		 * unsequenced: a lost one is replaced by the next instead of holding
+		 * everything behind it, and a lost reliable packet holds none of them up. A
+		 * player it leaves out keeps where it was. */
+		struct CompactWorldEntry {
+			int playerId;
+			Vector3 position;
+			Vector3 front; // zero when the server sent no direction
+		};
+		constexpr int kCompactWorldEntryBytes = 10;
+
+		/** Whether sequence number `seq` of a Compact World Update is newer than
+		 * `last` (-1: none yet), allowing for the u16 wrapping round. */
+		inline bool IsNewerCompactSeq(int seq, int last) {
+			if (last < 0)
+				return true;
+			int d = (seq - last) & 0xFFFF;
+			return d != 0 && d < 0x8000;
+		}
+
+		inline CompactWorldEntry ReadCompactWorldEntry(NetPacketReader& r) {
+			CompactWorldEntry e;
+			e.playerId = r.ReadByte();
+			float x = r.ReadShort() / 64.0F;
+			float y = r.ReadShort() / 64.0F;
+			float z = r.ReadShort() / 64.0F - 128.0F;
+			e.position = MakeVector3(x, y, z);
+			float fx = static_cast<int8_t>(r.ReadByte()) / 127.0F;
+			float fy = static_cast<int8_t>(r.ReadByte()) / 127.0F;
+			float fz = static_cast<int8_t>(r.ReadByte()) / 127.0F;
+			Vector3 f = MakeVector3(fx, fy, fz);
+			e.front = f.GetSquaredLength() > 0.01F ? f.Normalize() : MakeVector3(0, 0, 0);
+			return e;
 		}
 
 		/** A *Damage Markers* packet: a hit the local player dealt, as the server applied

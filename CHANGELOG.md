@@ -5,6 +5,10 @@ version's section at the top of its release notes, under "What's new", and
 the game shows those lines when it offers the update. Keep each line short:
 one change, in a player's words.
 
+## 0.3.4
+
+- Smoother other players on servers with big hordes: their positions come in one small packet, so a lost one no longer holds the rest up
+
 ## 0.3.3
 
 - Training has its own page: the Tutorial and Aim training

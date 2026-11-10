@@ -1122,6 +1122,38 @@ namespace spades {
 					}
 					SPAssert(r.ReadRemainingData().empty());
 				} break;
+				case PacketTypeCompactWorldUpdate: {
+					// What a World Update does, for the players listed (see ReadCompactWorldEntry).
+					if (r.GetNumRemainingBytes() < 2)
+						break;
+					{
+						int seq = r.ReadShort();
+						if (!IsNewerCompactSeq(seq, lastCompactSeq))
+							break; // overtaken by a newer one (it comes unsequenced)
+						lastCompactSeq = seq;
+					}
+					client->MarkWorldUpdate();
+					while (r.GetNumRemainingBytes() >= static_cast<std::size_t>(kCompactWorldEntryBytes)) {
+						CompactWorldEntry e = ReadCompactWorldEntry(r);
+						int idx = e.playerId;
+						if (idx >= properties->GetMaxNumPlayerSlots() ||
+						    idx >= static_cast<int>(savedPlayerPos.size()))
+							continue;
+						bool facing = e.front.GetSquaredLength() > 0.0F;
+						if (GetWorld()) {
+							auto p = GetWorld()->GetPlayer(idx);
+							if (p && p != GetWorld()->GetLocalPlayer() && p->IsAlive() &&
+							    !p->IsSpectator()) {
+								p->RepositionPlayer(e.position);
+								if (facing)
+									p->SetOrientation(e.front);
+							}
+						}
+						savedPlayerPos.at(idx) = e.position;
+						if (facing)
+							savedPlayerFront.at(idx) = e.front;
+					}
+				} break;
 				case PacketTypeInputData:
 					if (!GetWorld())
 						break;
@@ -1524,6 +1556,7 @@ namespace spades {
 				} break;
 				case PacketTypeMapStart: {
 					// next map!
+					lastCompactSeq = -1;
 					if (protocolVersion == 4)
 						SendMapCached();
 
