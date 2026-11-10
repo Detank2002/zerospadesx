@@ -7,12 +7,12 @@ one change, in a player's words.
 
 ## 0.3.4
 
-- Other players move more smoothly on busy servers, like Survive with its big hordes
-- Fixed: the flashlight didn't work on some graphics settings
-- Cleaner colours: the colour filter is now off on every graphics setting
-- The server list shows icons for a server's extra features once you've played there; hover a server to see what they are
-- A new Extensions filter finds the servers with extra features
-- The pause menu now names every feature a server has
+- Improved: smoothness on servers with up to 200 players
+- Fixed: flashlight disabled on some graphics settings
+- Improved: cleaner colours, with the colour filter off on every graphics setting
+- New: icons in the server list for each server's extra features; hover a server to see what they are
+- New: an Extensions filter in the server list
+- Fixed: some server features named "Unknown" in the pause menu
 
 ## 0.3.3
 
