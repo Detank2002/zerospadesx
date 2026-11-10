@@ -24,6 +24,7 @@
 #include "ServerListView.h"
 #include <Client/IFont.h>
 #include <Client/IRenderer.h>
+#include <Client/NetClient.h>
 #include <Core/Debug.h>
 #include <Core/Strings.h>
 #include <Gui/MainScreenHelper.h>
@@ -115,8 +116,8 @@ namespace spades {
 					x += symbolSize + gap;
 				}
 				if (hover)
-					ServerExtensionsHint::SetHovered(item->GetName() + ": " +
-					                                 ExtensionNames(extensions));
+					ServerExtensionsHint::SetHovered(item->GetName(), extensions,
+					                                 AABB2(pos.x, pos.y, sz.x, sz.y));
 			}
 
 			// Draw server slots
@@ -176,34 +177,73 @@ namespace spades {
 		// -- ServerExtensionsHint --
 
 		namespace {
-			std::string g_hoveredExtensions;
-		}
+			struct HoveredExtensions {
+				std::string title;
+				std::vector<std::uint8_t> ids;
+				AABB2 row;
+			};
+			HoveredExtensions g_hovered;
+		} // namespace
 
-		void ServerExtensionsHint::SetHovered(std::string text) {
-			g_hoveredExtensions = std::move(text);
+		void ServerExtensionsHint::SetHovered(std::string title, std::vector<std::uint8_t> ids,
+		                                      AABB2 row) {
+			g_hovered = {std::move(title), std::move(ids), row};
 		}
 
 		void ServerExtensionsHint::Render() {
-			std::string text;
-			std::swap(text, g_hoveredExtensions); // shown once: the row sets it each frame
+			HoveredExtensions h;
+			std::swap(h, g_hovered); // shown once: the row sets it each frame
 			client::IFont* font = GetFont();
-			if (text.empty() || !font)
+			if (h.ids.empty() || !font)
 				return;
+			client::IRenderer& r = GetManager().GetRenderer();
+			const Vector4 accent = MakeVector4(1.0F, 0.72F, 0.2F, 1.0F);
+			const Vector4 plain = MakeVector4(0.75F, 0.75F, 0.75F, 1.0F);
 
-			// Cut to the width, at a character's start
-			Vector2 pos = GetScreenPosition();
-			if (font->Measure(text).x > size.x) {
-				while (!text.empty() && font->Measure(text + "...").x > size.x) {
-					text.pop_back();
-					while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80)
-						text.pop_back();
-				}
-				text += "...";
+			const std::vector<std::uint8_t> ids = ExtensionsInOrder(h.ids);
+			const float pad = 8.0F;
+			const float lineHeight = font->Measure("Ag").y + 2.0F;
+			const float symbolSize = 12.0F;
+			const float textX = symbolSize + 8.0F;
+			float width = font->Measure(h.title).x;
+			for (std::uint8_t id : ids)
+				width = std::max(width,
+				                 textX + font->Measure(client::GetExtensionDisplayName(id)).x);
+			const float boxW = width + pad * 2.0F;
+			const float boxH = lineHeight * static_cast<float>(ids.size() + 1) + pad * 2.0F;
+			const float screenW = GetManager().screenWidth;
+			const float screenH = GetManager().screenHeight;
+
+			float x, y;
+			if (screenW - h.row.GetMaxX() >= boxW + 24.0F) {
+				// Beside the list, level with the row, kept on the screen
+				x = h.row.GetMaxX() + 16.0F;
+				y = std::max(8.0F, std::min(h.row.GetMinY() - pad, screenH - boxH - 8.0F));
+			} else {
+				// Under the row, or over it when it would run off the bottom
+				x = h.row.GetMinX() + 20.0F;
+				y = h.row.GetMaxY() + 2.0F;
+				if (y + boxH > screenH - 60.0F)
+					y = h.row.GetMinY() - 2.0F - boxH;
 			}
-			const Vector2 txtSize = font->Measure(text);
-			font->DrawShadow(text, pos + MakeVector2(0.0F, (size.y - txtSize.y) * 0.5F), 1.0F,
-			                 MakeVector4(1.0F, 0.72F, 0.2F, 1.0F),
-			                 MakeVector4(0.0F, 0.0F, 0.0F, 0.4F));
+
+			ui::SetColorNP(r, MakeVector4(0.08F, 0.08F, 0.1F, 0.94F));
+			r.DrawFilledRect(x, y, x + boxW, y + boxH);
+			ui::SetColorNP(r, MakeVector4(1.0F, 0.72F, 0.2F, 0.7F));
+			r.DrawOutlinedRect(x, y, x + boxW, y + boxH);
+
+			float ty = y + pad;
+			font->Draw(h.title, MakeVector2(x + pad, ty), 1.0F, MakeVector4(1.0F, 1.0F, 1.0F, 1.0F));
+			for (std::uint8_t id : ids) {
+				ty += lineHeight;
+				const bool symbol = HasExtensionSymbol(id);
+				if (symbol)
+					DrawExtensionSymbol(r, *font, id,
+					                    MakeVector2(x + pad, ty + (lineHeight - 2.0F - symbolSize) * 0.5F),
+					                    symbolSize, accent);
+				font->Draw(client::GetExtensionDisplayName(id), MakeVector2(x + pad + textX, ty),
+				           1.0F, symbol ? accent : plain);
+			}
 		}
 
 		// -- ServerListModel --

@@ -199,14 +199,14 @@ namespace spades {
 			}
 		}
 
-		std::string ExtensionNames(const std::vector<std::uint8_t>& ids) {
-			std::string out;
-			for (std::uint8_t id : ExtensionsWithSymbols(ids))
-				out += (out.empty() ? "" : ", ") + client::GetExtensionDisplayName(id);
+		std::vector<std::uint8_t> ExtensionsInOrder(const std::vector<std::uint8_t>& ids) {
+			std::vector<std::uint8_t> out = ExtensionsWithSymbols(ids);
 			for (std::uint8_t id : ids)
 				if (IsPlumbing(id))
-					out += (out.empty() ? "" : ", ") + client::GetExtensionDisplayName(id);
+					out.push_back(id);
 			return out;
 		}
+
+		bool HasExtensionSymbol(std::uint8_t id) { return !IsPlumbing(id); }
 	} // namespace gui
 } // namespace spades

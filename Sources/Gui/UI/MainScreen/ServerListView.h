@@ -75,15 +75,18 @@ namespace spades {
 		};
 
 		/**
-		 * The footer line naming the extensions of the server row under the
-		 * mouse (its symbols say which; this, what they are). A row sets the
-		 * text as it renders; this, rendered after the list, shows and clears it.
+		 * The extensions of the server row the mouse is on, each with its symbol
+		 * and name: a key to the row's symbols. In the empty space beside the
+		 * list, level with the row, where the screen is wide enough; else in a
+		 * box under the row. A row sets it as it renders; this, added after the
+		 * list so drawn over its rows, shows and clears it. Where it is placed
+		 * does not matter: it draws by the row.
 		 */
 		class ServerExtensionsHint : public ui::UIElement {
 		public:
 			ServerExtensionsHint(ui::UIManager* manager) : ui::UIElement(manager) {}
-			/** Set by the hovered row each frame. */
-			static void SetHovered(std::string text);
+			/** Set by the hovered row each frame, with the row's place on screen. */
+			static void SetHovered(std::string title, std::vector<std::uint8_t> ids, AABB2 row);
 			void Render() override;
 		};
 

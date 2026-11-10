@@ -49,7 +49,11 @@ namespace spades {
 		void DrawExtensionSymbol(client::IRenderer& r, client::IFont& font, std::uint8_t id,
 		                         Vector2 topLeft, float size, Vector4 color);
 
-		/** The names of a server's extensions, every one, for the hover line. */
-		std::string ExtensionNames(const std::vector<std::uint8_t>& ids);
+		/** Every one of a server's extensions, the ones with a symbol first (in
+		 * their order), then the plumbing. */
+		std::vector<std::uint8_t> ExtensionsInOrder(const std::vector<std::uint8_t>& ids);
+
+		/** Whether an extension is drawn with a symbol in the row. */
+		bool HasExtensionSymbol(std::uint8_t id);
 	} // namespace gui
 } // namespace spades
