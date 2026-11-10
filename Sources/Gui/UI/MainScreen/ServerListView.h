@@ -74,6 +74,19 @@ namespace spades {
 			Handle<ui::UIElement> CreateElement(int row) override;
 		};
 
+		/**
+		 * The footer line naming the extensions of the server row under the
+		 * mouse (its symbols say which; this, what they are). A row sets the
+		 * text as it renders; this, rendered after the list, shows and clears it.
+		 */
+		class ServerExtensionsHint : public ui::UIElement {
+		public:
+			ServerExtensionsHint(ui::UIManager* manager) : ui::UIElement(manager) {}
+			/** Set by the hovered row each frame. */
+			static void SetHovered(std::string text);
+			void Render() override;
+		};
+
 		/** A clickable column header for the server browser. */
 		class ServerListHeader : public ui::ButtonBase {
 		public:

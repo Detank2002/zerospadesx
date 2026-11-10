@@ -54,6 +54,7 @@
 #include <Core/Settings.h>
 #include <Core/Strings.h>
 #include <Core/TMPUtils.h>
+#include "ServerExtensionLog.h"
 
 DEFINE_SPADES_SETTING(cg_unicode, "1");
 
@@ -306,6 +307,7 @@ namespace spades {
 			timeOfDay.reset();
 			customKickReasonString.clear();
 			serverExtensions.clear();
+			extensionLogKey = ServerExtensionKey(hostname.ToString(false));
 
 			peer = enet_host_connect(host, &addr, 1, protocolVersion);
 			if (peer == NULL)
@@ -626,6 +628,10 @@ namespace spades {
 				case ExtensionTypePlayerLimit: return "Player Limit";
 				case ExtensionTypeMessageTypes: return "Message Types";
 				case ExtensionTypeKickReason: return "Kick Reason";
+				case ExtensionTypeVRPresence: return "VR Presence";
+				// The Compact World Update (0x3E): named before this client has it,
+				// as Survive offers it
+				case 0x3E: return "Compact World Update";
 				default: return _Tr("NetClient", "Unknown (ID {0})", ToString(id));
 			}
 		}
@@ -793,6 +799,13 @@ namespace spades {
 			}
 
 			SendSupportedExtensions();
+
+			// For the server list: what this server and this client both have
+			std::vector<std::uint8_t> shared;
+			for (const auto& e : serverExtensions)
+				if (e.supportedByClient)
+					shared.push_back(e.id);
+			RecordServerExtensions(extensionLogKey, shared);
 		}
 
 		void NetClient::HandleVRPresencePacket(spades::client::NetPacketReader& r) {

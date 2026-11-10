@@ -100,6 +100,7 @@ namespace spades {
 			ui::Button* filterProtocol3Button;
 			ui::Button* filterProtocol4Button;
 			ui::Button* filterFullButton;
+			ui::Button* filterExtensionsButton;
 			ui::Field* filterField;
 
 			ui::ListView* serverList;

@@ -104,6 +104,9 @@ namespace spades {
 			std::unordered_map<uint8_t, uint8_t> extensions;
 			/** Every extension announced by the server, in announcement order (including unsupported ones) */
 			std::vector<ServerExtensionInfo> serverExtensions;
+			/** The joined server's key in the server list's record of extensions
+			 * (ServerExtensionLog.h). */
+			std::string extensionLogKey;
 			/** Extensions implemented in this client (map of extension id → version) */
 			std::unordered_map<uint8_t, uint8_t> implementedExtensions{
 			  {ExtensionTypePlayerProperties, 1},

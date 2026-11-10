@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string>
 #include <unordered_set>
 #include <vector>
 #include <memory>
@@ -47,6 +49,7 @@ namespace spades {
 			int numPlayers;
 			int maxPlayers;
 			bool favorite;
+			std::string extensionKey;
 			
 		protected:
 			~MainScreenServerItem();
@@ -65,6 +68,8 @@ namespace spades {
 			int GetNumPlayers() const { return numPlayers; }
 			int GetMaxPlayers() const { return maxPlayers; }
 			bool IsFavorite() const { return favorite; }
+			/** The extensions this server was seen with when last joined, none if never (ServerExtensionLog.h). */
+			std::vector<std::uint8_t> GetExtensions() const;
 			void SetFavorite(bool favorite) { this->favorite = favorite; }
 		};
 

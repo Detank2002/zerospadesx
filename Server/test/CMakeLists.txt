@@ -42,6 +42,12 @@ zs_test_executable(update_package_test
 	"${ZS_TEST_SOURCES}/monocypher/monocypher-ed25519.c")
 add_test(NAME update_package COMMAND update_package_test)
 
+# The key a server's extension list is remembered under
+zs_test_executable(server_extension_key_test
+	"${CMAKE_CURRENT_SOURCE_DIR}/server_extension_key_test.cpp"
+	"${ZS_TEST_SOURCES}/Client/ServerExtensionKey.cpp")
+add_test(NAME server_extension_key COMMAND server_extension_key_test)
+
 # A VR player's pose, as a client without a headset decodes it (what a macOS
 # build draws other players' VR from)
 find_package(Python3 COMPONENTS Interpreter)
@@ -52,4 +58,5 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 add_custom_target(zs_tests DEPENDS
-	vr_state_test xr_caps_test vr_pose_fixture update_package_test training_server_test)
+	vr_state_test xr_caps_test vr_pose_fixture update_package_test training_server_test
+	server_extension_key_test)

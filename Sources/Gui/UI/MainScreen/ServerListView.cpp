@@ -20,6 +20,7 @@
 
 #include <algorithm>
 
+#include "ExtensionSymbols.h"
 #include "ServerListView.h"
 #include <Client/IFont.h>
 #include <Client/IRenderer.h>
@@ -96,6 +97,28 @@ namespace spades {
 			// Draw server name
 			font->Draw(item->GetName(), pos + MakeVector2(nameOffsetX, itemOffsetY), 1.0F, fgcolor);
 
+			// The extensions it was seen with, a symbol each after the name, as many
+			// as fit before the slots; their names in the footer while hovered.
+			const std::vector<std::uint8_t> extensions = item->GetExtensions();
+			if (!extensions.empty()) {
+				const Vector4 symbolColor = MakeVector4(1.0F, 0.72F, 0.2F, col.w);
+				const float symbolSize = std::min(11.0F, sz.y - 8.0F);
+				const float gap = 4.0F;
+				const float limit = slotsOffsetX - 22.0F * scaleF;
+				float x = nameOffsetX + font->Measure(item->GetName()).x + 8.0F;
+				const float y = (sz.y - symbolSize) * 0.5F;
+				for (std::uint8_t id : ExtensionsWithSymbols(extensions)) {
+					if (x + symbolSize > limit)
+						break;
+					DrawExtensionSymbol(r, *font, id, pos + MakeVector2(x, y), symbolSize,
+					                    symbolColor);
+					x += symbolSize + gap;
+				}
+				if (hover)
+					ServerExtensionsHint::SetHovered(item->GetName() + ": " +
+					                                 ExtensionNames(extensions));
+			}
+
 			// Draw server slots
 			std::string playersStr =
 			    std::to_string(item->GetNumPlayers()) + "/" + std::to_string(item->GetMaxPlayers());
@@ -148,6 +171,39 @@ namespace spades {
 			font->Draw(pingStr,
 			           pos + MakeVector2(pingOffsetX - font->Measure(pingStr).x, itemOffsetY), 1.0F,
 			           pingCol);
+		}
+
+		// -- ServerExtensionsHint --
+
+		namespace {
+			std::string g_hoveredExtensions;
+		}
+
+		void ServerExtensionsHint::SetHovered(std::string text) {
+			g_hoveredExtensions = std::move(text);
+		}
+
+		void ServerExtensionsHint::Render() {
+			std::string text;
+			std::swap(text, g_hoveredExtensions); // shown once: the row sets it each frame
+			client::IFont* font = GetFont();
+			if (text.empty() || !font)
+				return;
+
+			// Cut to the width, at a character's start
+			Vector2 pos = GetScreenPosition();
+			if (font->Measure(text).x > size.x) {
+				while (!text.empty() && font->Measure(text + "...").x > size.x) {
+					text.pop_back();
+					while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80)
+						text.pop_back();
+				}
+				text += "...";
+			}
+			const Vector2 txtSize = font->Measure(text);
+			font->DrawShadow(text, pos + MakeVector2(0.0F, (size.y - txtSize.y) * 0.5F), 1.0F,
+			                 MakeVector4(1.0F, 0.72F, 0.2F, 1.0F),
+			                 MakeVector4(0.0F, 0.0F, 0.0F, 0.4F));
 		}
 
 		// -- ServerListModel --

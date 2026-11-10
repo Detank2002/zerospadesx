@@ -424,6 +424,24 @@ namespace spades {
 				}
 
 				{
+					Handle<ProtocolButton> button = Handle<ProtocolButton>::New(manager);
+					filterExtensionsButton = button.GetPointerOrNull();
+					filterExtensionsButton->SetBounds(
+					    AABB2(contentsLeft + 315.0F, footerPos, 85.0F, 30.0F));
+					filterExtensionsButton->caption = _Tr("MainScreen", "Extensions");
+					filterExtensionsButton->activated = [this](UIElement&) { UpdateServerList(); };
+					filterExtensionsButton->toggle = true;
+					serverPanel->AddChild(filterExtensionsButton);
+				}
+
+				{
+					Handle<ServerExtensionsHint> hint = Handle<ServerExtensionsHint>::New(manager);
+					hint->SetBounds(
+					    AABB2(contentsLeft + 410.0F, footerPos, contentsWidth - 410.0F, 30.0F));
+					serverPanel->AddChild(hint.GetPointerOrNull());
+				}
+
+				{
 					Handle<Field> field = Handle<Field>::New(manager);
 					filterField = field.GetPointerOrNull();
 					filterField->SetBounds(AABB2(contentsLeft + 210.0F, footerPos, 100.0F, 30.0F));
@@ -1347,6 +1365,7 @@ namespace spades {
 			bool filterProtocol3 = filterProtocol3Button->toggled;
 			bool filterProtocol4 = filterProtocol4Button->toggled;
 			bool filterFull = filterFullButton->toggled;
+			bool filterExtensions = filterExtensionsButton->toggled;
 			std::string filterText = filterField->GetText();
 			std::vector<Handle<MainScreenServerItem>> list2;
 			for (const Handle<MainScreenServerItem>& item : list) {
@@ -1355,6 +1374,8 @@ namespace spades {
 				if (filterProtocol4 && (item->GetProtocol() != "0.76"))
 					continue;
 				if (filterFull && (item->GetNumPlayers() >= item->GetMaxPlayers()))
+					continue;
+				if (filterExtensions && item->GetExtensions().empty())
 					continue;
 				if (filterText.size() > 0) {
 					if (!(StringContainsCaseInsensitive(item->GetName(), filterText) ||

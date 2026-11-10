@@ -35,6 +35,7 @@
 #include "MainScreen.h"
 #include "MainScreenHelper.h"
 #include <Client/DemoRecorder.h>
+#include <Client/ServerExtensionLog.h>
 #include <Core/FileManager.h>
 #include <Core/IStream.h>
 #include <Core/Settings.h>
@@ -565,6 +566,7 @@ namespace spades {
 			SPADES_MARK_FUNCTION();
 			name = item->GetName();
 			address = item->GetAddress();
+			extensionKey = client::ServerExtensionKey(address);
 			mapName = item->GetMapName();
 			gameMode = item->GetGameMode();
 			country = item->GetCountryCode();
@@ -573,6 +575,10 @@ namespace spades {
 			numPlayers = item->GetNumPlayers();
 			maxPlayers = item->GetMaxNumPlayers();
 			this->favorite = favorite;
+		}
+
+		std::vector<std::uint8_t> MainScreenServerItem::GetExtensions() const {
+			return client::FindServerExtensions(extensionKey);
 		}
 
 		MainScreenServerItem::~MainScreenServerItem() { SPADES_MARK_FUNCTION(); }
