@@ -90,6 +90,11 @@ DEFINE_SPADES_SETTING(vr_profile, "auto");
 DEFINE_SPADES_SETTING(core_profile, "");
 
 
+// Set once the colour correction, on by default before 0.3.4, has been turned
+// off in the config; after that the toggle is the player's again.
+DEFINE_SPADES_SETTING(cl_zsColorCorrectionOff, "0");
+SPADES_SETTING(r_colorCorrection);
+
 #ifdef WIN32
 // windows.h must be included before DbgHelp.h and shlobj.h.
 #include <windows.h>
@@ -101,11 +106,6 @@ DEFINE_SPADES_SETTING(core_profile, "");
 #define strcasecmp(x, y) _stricmp(x, y)
 
 DEFINE_SPADES_SETTING(core_win32BeginPeriod, "1");
-
-// Set once the colour correction, on by default before 0.3.4, has been turned
-// off in the config; after that the toggle is the player's again.
-DEFINE_SPADES_SETTING(cl_zsColorCorrectionOff, "0");
-SPADES_SETTING(r_colorCorrection);
 
 namespace {
 	class ThreadQuantumSetter {
