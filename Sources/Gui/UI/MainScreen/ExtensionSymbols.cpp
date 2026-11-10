@@ -34,14 +34,12 @@ namespace spades {
 		namespace {
 			using client::IRenderer;
 
-			constexpr std::uint8_t kCompactWorldUpdate = 0x3E;
-
 			/** The symbols' order: what changes the game first. */
 			const std::uint8_t kOrder[] = {
 			  client::ExtensionTypeTeamplay,    client::ExtensionTypeDamageMarkers,
 			  client::ExtensionTypePlayerOutfit, client::ExtensionTypePieMenu,
 			  client::ExtensionTypeFlashlight,  client::ExtensionTypeDaytimeWeather,
-			  kCompactWorldUpdate,              client::ExtensionTypeVRPresence,
+			  client::ExtensionTypeCompactWorldUpdate, client::ExtensionTypeVRPresence,
 			  client::ExtensionTypePlayerLimit};
 
 			bool IsPlumbing(std::uint8_t id) {
@@ -159,7 +157,7 @@ namespace spades {
 					p.Arc(cx + h, cy, inner, a, 2.0F * kPi - a);
 					break;
 				}
-				case kCompactWorldUpdate:
+				case client::ExtensionTypeCompactWorldUpdate:
 					// A lightning bolt: the world's news, faster
 					p.Line(0.62F, 0.0F, 0.22F, 0.55F);
 					p.Line(0.22F, 0.55F, 0.52F, 0.55F);

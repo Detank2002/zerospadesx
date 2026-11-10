@@ -629,9 +629,7 @@ namespace spades {
 				case ExtensionTypeMessageTypes: return "Message Types";
 				case ExtensionTypeKickReason: return "Kick Reason";
 				case ExtensionTypeVRPresence: return "VR Presence";
-				// The Compact World Update (0x3E): named before this client has it,
-				// as Survive offers it
-				case 0x3E: return "Compact World Update";
+				case ExtensionTypeCompactWorldUpdate: return "Compact World Update";
 				default: return _Tr("NetClient", "Unknown (ID {0})", ToString(id));
 			}
 		}
