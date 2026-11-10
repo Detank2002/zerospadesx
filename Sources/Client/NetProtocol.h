@@ -87,7 +87,7 @@ namespace spades {
 			PacketTypeDaytimeWeather = 115, // S2C, extension id 0x33 (`64 + extension id`)
 			PacketTypePlayerOutfit = 117,   // S2C, extension id 0x35 (`64 + extension id`); see PlayerOutfit.h
 			PacketTypeVRPresence = 122, // C2S2P, extension id 58; see VRNetProtocol.h
-			PacketTypeCompactWorldUpdate = 118, // S2C, extension id 0x36; see ReadCompactWorldEntry
+			PacketTypeCompactWorldUpdate = 126, // S2C, extension id 0x3E; see ReadCompactWorldEntry
 		};
 
 		/** Protocol extension ids, as negotiated through `PacketTypeExtensionInfo`. */
@@ -99,7 +99,7 @@ namespace spades {
 			ExtensionTypeFlashlight = 0x32,
 			ExtensionTypeDaytimeWeather = 0x33,
 			ExtensionTypePlayerOutfit = 0x35,
-			ExtensionTypeCompactWorldUpdate = 0x36,
+			ExtensionTypeCompactWorldUpdate = 0x3E, // past ZeroSpades' range (to 0x33) by ten
 			ExtensionTypeVRPresence = 58,
 			ExtensionTypePlayerLimit = 192,
 			ExtensionTypeMessageTypes = 193,
@@ -332,7 +332,7 @@ namespace spades {
 			return entries;
 		}
 
-		/** One player in a *Compact World Update* (extension 0x36, packet 118): what a
+		/** One player in a *Compact World Update* (extension 0x3E, packet 126): what a
 		 * World Update says of a player, in 10 bytes instead of 24, and only for the
 		 * players the server lists. The packet is the type byte, a u16 sequence number
 		 * (little-endian, counting up; an older one arriving after a newer one is
