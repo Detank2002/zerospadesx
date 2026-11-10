@@ -52,6 +52,7 @@ namespace spades {
 		const std::vector<QualityPreset>& GetPCQualityPresets() {
 			// What costs frames, not what is a matter of taste: outlines, depth of
 			// field, camera blur, HDR and the temporal AA are left as they are.
+			// The colour correction is off at every level: it looked worse.
 			// High is the defaults. MSAA takes effect at the next start, the rest
 			// at the next map.
 			static const std::vector<std::string> keys = {
@@ -64,13 +65,13 @@ namespace spades {
 			        {"0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "1", "1024", "0", "0", "0",
 			         "0"}),
 			  Level("Medium", keys,
-			        {"0", "1", "0", "1", "0", "1", "1", "0", "0", "1", "4", "1024", "1", "1", "0",
+			        {"0", "1", "0", "1", "0", "0", "1", "0", "0", "1", "4", "1024", "1", "1", "0",
 			         "0"}),
 			  Level("High", keys,
-			        {"0", "1", "1", "1", "1", "1", "1", "0", "0", "2", "8", "2048", "1", "1", "0",
+			        {"0", "1", "1", "1", "1", "0", "1", "0", "0", "2", "8", "2048", "1", "1", "0",
 			         "0"}),
 			  Level("Ultra", keys,
-			        {"4", "0", "1", "1", "1", "1", "1", "1", "1", "3", "16", "4096", "1", "1", "1",
+			        {"4", "0", "1", "1", "1", "0", "1", "1", "1", "3", "16", "4096", "1", "1", "1",
 			         "1"}),
 			};
 			return presets;
@@ -85,8 +86,9 @@ namespace spades {
 			// correction; and the costly textures shrink. Both eyes in one pass,
 			// which halves the draw calls; the water drawn in the scene's pass and
 			// the pass resolving itself, which spare a whole copy of the scene.
-			// Balanced adds sharper shadows and textures and the colour correction
-			// (7.1 ms of a Quest 3's GPU at 1680x1760, against Performance's 6.5);
+			// Balanced adds sharper shadows and textures (and once the colour
+			// correction, now off at every level; with it 7.1 ms of a Quest 3's
+			// GPU at 1680x1760, against Performance's 6.5);
 			// Quality the soft particles, which bring the depth read back (9.6 ms,
 			// still 72 FPS there). Not the reflecting water: with it a Quest 3
 			// fell to 50 FPS, its CPU and GPU levels raised or not.
@@ -101,10 +103,10 @@ namespace spades {
 			        {"4", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "1", "4",
 			         "1024", "1", "1", "1"}),
 			  Level("Balanced", keys,
-			        {"4", "0", "0", "0", "0", "0", "0", "0", "1", "0", "0", "0", "0", "1", "8",
+			        {"4", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "1", "8",
 			         "2048", "1", "1", "1"}),
 			  Level("Quality", keys,
-			        {"4", "0", "0", "0", "0", "1", "0", "0", "1", "0", "0", "0", "0", "1", "8",
+			        {"4", "0", "0", "0", "0", "1", "0", "0", "0", "0", "0", "0", "0", "1", "8",
 			         "2048", "1", "1", "1"}),
 			};
 			return presets;

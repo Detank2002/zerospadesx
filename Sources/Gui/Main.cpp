@@ -102,6 +102,11 @@ DEFINE_SPADES_SETTING(core_profile, "");
 
 DEFINE_SPADES_SETTING(core_win32BeginPeriod, "1");
 
+// Set once the colour correction, on by default before 0.3.4, has been turned
+// off in the config; after that the toggle is the player's again.
+DEFINE_SPADES_SETTING(cl_zsColorCorrectionOff, "0");
+SPADES_SETTING(r_colorCorrection);
+
 namespace {
 	class ThreadQuantumSetter {
 	public:
@@ -935,6 +940,13 @@ int main(int argc, char** argv) {
 
 		// load preferences.
 		spades::Settings::GetInstance()->Load();
+
+		// The colour correction looked worse, so it is off at every quality
+		// level now; once, also in a config saved while it was on by default.
+		if (!static_cast<bool>(cl_zsColorCorrectionOff)) {
+			r_colorCorrection = 0;
+			cl_zsColorCorrectionOff = 1;
+		}
 
 		// Apply --override-cvar values in memory. The previous value of each
 		// overridden variable is captured here and restored just before the

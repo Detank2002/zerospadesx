@@ -26,7 +26,7 @@
 // it alone reads.
 DEFINE_SPADES_SETTING(r_bloom, "1");
 DEFINE_SPADES_SETTING(r_cameraBlur, "1");
-DEFINE_SPADES_SETTING(r_colorCorrection, "1");
+DEFINE_SPADES_SETTING(r_colorCorrection, "0");
 DEFINE_SPADES_SETTING(r_depthOfField, "0");
 DEFINE_SPADES_SETTING(r_depthOfFieldMaxCoc, "0.01");
 DEFINE_SPADES_SETTING(r_depthPrepass, "0");

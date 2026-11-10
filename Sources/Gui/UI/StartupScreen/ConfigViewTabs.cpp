@@ -277,11 +277,11 @@ namespace spades {
 					cplx->AddPreset(Handle<StartupScreenComplexConfigPreset>::New(
 					    _Tr("StartupScreen", "Low"), "0|0|0|0|0|0|0"));
 					cplx->AddPreset(Handle<StartupScreenComplexConfigPreset>::New(
-					    _Tr("StartupScreen", "Medium"), "1|0|1|0|1|0|0"));
+					    _Tr("StartupScreen", "Medium"), "1|0|1|0|0|0|0"));
 					cplx->AddPreset(Handle<StartupScreenComplexConfigPreset>::New(
-					    _Tr("StartupScreen", "High"), "1|1|1|1|1|1|0"));
+					    _Tr("StartupScreen", "High"), "1|1|1|1|0|1|0"));
 					cplx->AddPreset(Handle<StartupScreenComplexConfigPreset>::New(
-					    _Tr("StartupScreen", "Ultra"), "1|1|1|1|1|1|1"));
+					    _Tr("StartupScreen", "Ultra"), "1|1|1|1|0|1|1"));
 
 					cfg->AddRow(Handle<StartupScreenConfigComplexItemEditor>::New(
 					                ui, cplx, _Tr("StartupScreen", "Post-process"),
