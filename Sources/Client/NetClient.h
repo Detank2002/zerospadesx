@@ -117,11 +117,15 @@ namespace spades {
 			  {ExtensionTypeDaytimeWeather, 1},
 			  {ExtensionTypePieMenu, 1},
 			  {ExtensionTypePlayerOutfit, 1},
+			  {ExtensionTypeCompactWorldUpdate, 1},
 			  {ExtensionTypePlayerLimit, 1},
 			  {ExtensionTypeMessageTypes, 1},
 			  {ExtensionTypeKickReason, 1}};
 
-			FlashlightBeams flashlightBeams;
+			/** The newest Compact World Update's sequence number, -1 for none yet. */
+			int lastCompactSeq = -1;
+
+						FlashlightBeams flashlightBeams;
 
 			/** The time of day of the last Sky. It belongs to the connection, not to a
 			 * world, so it lasts through Map Start. */
