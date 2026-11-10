@@ -63,6 +63,7 @@ SPADES_SETTING(r_softParticles);
 SPADES_SETTING(r_modelShadows);
 SPADES_SETTING(r_radiosity);
 SPADES_SETTING(r_dlights);
+SPADES_SETTING(r_dlightsSupported);
 SPADES_SETTING(r_water);
 SPADES_SETTING(r_multisamples);
 SPADES_SETTING(r_fxaa);
@@ -486,10 +487,12 @@ namespace spades {
 				}
 
 				// The dynamic lights are uploaded as a float texture, and where the map
-				// stops each beam is drawn into one.
+				// stops each beam is drawn into one. Without, not even a flashlight.
+				r_dlightsSupported = 1;
 				for (const char* ex : {"GL_ARB_texture_float", "GL_ARB_color_buffer_float"}) {
 					if (extensions.find(ex) != std::string::npos)
 						continue;
+					r_dlightsSupported = 0;
 					if (r_dlights) {
 						r_dlights = 0;
 						SPLog("Disabling r_dlights: no %s", ex);

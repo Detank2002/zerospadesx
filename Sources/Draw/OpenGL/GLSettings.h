@@ -45,6 +45,7 @@ namespace spades {
 			TypedItemHandle<float> r_depthOfFieldMaxCoc { *this, "r_depthOfFieldMaxCoc" };
 			TypedItemHandle<bool> r_depthPrepass        { *this, "r_depthPrepass" };
 			TypedItemHandle<bool> r_dlights             { *this, "r_dlights" };
+			TypedItemHandle<bool> r_dlightsSupported    { *this, "r_dlightsSupported" };
 			TypedItemHandle<float> r_exposureValue      { *this, "r_exposureValue" };
 			TypedItemHandle<int> r_fogShadow            { *this, "r_fogShadow", ItemFlags::Latch };
 			TypedItemHandle<bool> r_fxaa                { *this, "r_fxaa" };

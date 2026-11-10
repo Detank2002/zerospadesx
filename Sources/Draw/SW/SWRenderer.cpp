@@ -623,7 +623,7 @@ namespace spades {
 
 		void SWRenderer::AddLight(const client::DynamicLightParam& param) {
 			SPADES_MARK_FUNCTION();
-			if (!r_dlights)
+			if (!r_dlights && !param.alwaysLit)
 				return;
 
 			EnsureInitialized();

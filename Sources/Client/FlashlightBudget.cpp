@@ -102,8 +102,13 @@ namespace spades {
 
 			for (std::size_t k = 0; k < order.size(); k++) {
 				const Beam& beam = beams[order[k]];
-				if (k < MaxLitBeams())
-					renderer.AddLight(beam.light);
+				if (k < MaxLitBeams()) {
+					// Lit at every quality level: the beams are few (this budget),
+					// and a night map is dark without them.
+					DynamicLightParam light = beam.light;
+					light.alwaysLit = true;
+					renderer.AddLight(light);
+				}
 				else
 					AddGlow(renderer, map, beam);
 			}

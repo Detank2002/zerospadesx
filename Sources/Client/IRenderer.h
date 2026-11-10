@@ -115,6 +115,11 @@ namespace spades {
 			 * See the existing code for usage. */
 			std::array<Vector3, 3> spotAxis;
 
+			/** Drawn even with the dynamic lights (`r_dlights`) off, as a
+			 * flashlight is: a quality level must not leave a player blind at
+			 * night. */
+			bool alwaysLit = false;
+
 			/** The projected image for a spotlight. */
 			IImage* image = nullptr; // TODO: Replace this raw pointer with something
 

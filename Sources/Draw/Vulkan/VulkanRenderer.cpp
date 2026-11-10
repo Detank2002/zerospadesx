@@ -1457,7 +1457,7 @@ namespace spades {
 
 		void VulkanRenderer::AddLight(const client::DynamicLightParam& light) {
 			SPADES_MARK_FUNCTION();
-			if (!r_dlights)
+			if (!r_dlights && !light.alwaysLit)
 				return;
 
 			VulkanDynamicLight vkLight(light);

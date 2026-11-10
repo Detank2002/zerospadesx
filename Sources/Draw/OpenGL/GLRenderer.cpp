@@ -537,7 +537,9 @@ namespace spades {
 		}
 
 		void GLRenderer::AddLight(const client::DynamicLightParam& light) {
-			if (!settings.r_dlights)
+			// With the dynamic lights off, only the ones that must show (the
+			// flashlights), where the GPU can draw them.
+			if (!settings.r_dlights && !(light.alwaysLit && settings.r_dlightsSupported))
 				return;
 
 			GLDynamicLight glLight(light);
@@ -763,7 +765,7 @@ namespace spades {
 				ssaoBuffer.Release();
 			}
 
-			if (settings.r_dlights) {
+			if (settings.r_dlights || !lights.empty()) {
 				GLProfiler::Context p(*profiler, "Dynamic Light Pass [%d light(s)]",
 									  (int)lights.size());
 
@@ -904,7 +906,7 @@ namespace spades {
 					ambientShadowRenderer->Update();
 				if (mapOccupancy)
 					mapOccupancy->Update();
-				if (settings.r_dlights) {
+				if (settings.r_dlights || !lights.empty()) {
 					// Made on first use: they need float textures, which nothing else
 					// asks for unless HDR is on.
 					if (!dynamicLightTable)
@@ -924,7 +926,7 @@ namespace spades {
 
 			{
 				GLProfiler::Context p(*profiler, "Dynamic Light Occlusion Maps");
-				if (settings.r_dlights)
+				if (settings.r_dlights || !lights.empty())
 					dynamicLightOcclusionMaps->Render(lights, *dynamicLightTable);
 			}
 

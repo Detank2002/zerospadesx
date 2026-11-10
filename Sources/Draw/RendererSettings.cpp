@@ -31,6 +31,9 @@ DEFINE_SPADES_SETTING(r_depthOfField, "0");
 DEFINE_SPADES_SETTING(r_depthOfFieldMaxCoc, "0.01");
 DEFINE_SPADES_SETTING(r_depthPrepass, "0");
 DEFINE_SPADES_SETTING(r_dlights, "1");
+// Whether the GL renderer can draw dynamic lights at all, as the startup check
+// found; flashlights are drawn with r_dlights off only where it can.
+DEFINE_SPADES_SETTING(r_dlightsSupported, "1");
 DEFINE_SPADES_SETTING(r_exposureValue, "0");
 DEFINE_SPADES_SETTING(r_fogShadow, "0");
 DEFINE_SPADES_SETTING(r_fxaa, "1");
