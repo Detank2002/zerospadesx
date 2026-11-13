@@ -48,7 +48,14 @@ namespace spades {
 				modelSet = models->GetModelName(p.GetId(), p.GetTeamId());
 
 			playerId = p.GetId();
-			color = ConvertColorRGB(p.GetColor());
+			// In the colour the outfit was worn in (PlayerOutfit.h)
+			IntVector3 worn = p.GetColor();
+			if (models) {
+				const int team = models->GetColourTeam(p.GetId(), p.GetTeamId());
+				if (team != p.GetTeamId() && (team == 0 || team == 1))
+					worn = p.GetWorld().GetTeamColor(team);
+			}
+			color = ConvertColorRGB(worn);
 			weaponName = p.GetWeapon().GetName();
 			isLocalPlayer = p.IsLocalPlayer();
 			isZombiePlayer = p.IsZombie();

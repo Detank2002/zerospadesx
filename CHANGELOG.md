@@ -5,6 +5,13 @@ version's section at the top of its release notes, under "What's new", and
 the game shows those lines when it offers the update. Keep each line short:
 one change, in a player's words.
 
+## 0.3.5
+
+- New: zombies come in several looks, and each kind of brute has its own
+- New: zombies and brutes carry their own spade, and the Spitter its acid
+- New: a model editor, sharper text on high-DPI screens, and automatic screen setup
+- New: Escape on the main screen asks before quitting
+
 ## 0.3.4
 
 - Improved: smoothness on servers with up to 200 players

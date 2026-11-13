@@ -57,16 +57,28 @@ namespace spades {
 			static constexpr int kTeamOutfit = 255;
 			static constexpr int kSpectatorTeam = 255;
 
+			/** The outfits, by the spec's numbers (aosprotocol #14). Themes have
+			 * ranges of their own: the zombies from 64, the deployables from 80. */
 			enum Outfit {
-				Soldier = 0, Undead, Scout, Royal, Vampire, Miner, Ghillie, Brawler,
-				Scientist, Butcher, Convict, Builder, Robot, God, Demon, Bodyguard,
-				Terrorist, NumOutfits
+				Soldier = 0, Scout, Ghillie, Bodyguard, Terrorist, Convict, Brawler, Miner,
+				Builder, Scientist, Butcher, Royal, Robot, Vampire, Mummy, Demon, God,
+				Mascot, Tiger, Penguin, Bear, Unicorn, TRex, Banana, BlockStack,
+				Zombie = 64, Spitter, Leaper, Caller, Breaker,
+				// Not in the spec yet: asked for as the next zombie (Survive's brutes)
+				Toppler,
+				Turret = 80, Projector, DishAntenna, MastAntenna,
 			};
 
-			/** The model set an outfit is drawn with, or empty for the usual parts. */
-			static const std::string& FolderOf(int outfit);
+			/**
+			 * The model set an outfit is drawn with, or empty for the usual parts.
+			 * `playerId` picks among an outfit's variants, so a horde of plain
+			 * zombies does not wear one face.
+			 */
+			static const std::string& FolderOf(int outfit, int playerId = 0);
 
-			void SetPlayerOutfit(int playerId, int outfit);
+			/** Set Outfit: `colourTeam` is the team whose colour the player wears, or
+			 * 255 for their own. */
+			void SetPlayerOutfit(int playerId, int outfit, int colourTeam = kOwnColour);
 			/** Replaces every team's outfit; a team not in `outfits` wears 0. */
 			void SetTeamOutfits(const std::unordered_map<int, int>& outfits);
 			/** A player wearing their team's outfit takes it now. */
@@ -80,8 +92,13 @@ namespace spades {
 			int GetOutfit(int playerId, int team) const;
 			/** The model set this player is drawn with, or empty for the usual one. */
 			const std::string& GetModelName(int playerId, int team) const {
-				return FolderOf(GetOutfit(playerId, team));
+				return FolderOf(GetOutfit(playerId, team), playerId);
 			}
+			/** The team whose colour this player wears: their own, `team`, unless a
+			 * Set Outfit gave another. */
+			int GetColourTeam(int playerId, int team) const;
+
+			static constexpr int kOwnColour = 255;
 
 			/**
 			 * The file to draw `part` ("Head", "LegRight"...) from for a player drawn
@@ -98,6 +115,8 @@ namespace spades {
 			std::unordered_map<int, int> teamOutfits;
 			// Set Outfit, other than 255.
 			std::unordered_map<int, int> playerOutfits;
+			// Set Outfit's colour, where it is not the player's own.
+			std::unordered_map<int, int> playerColours;
 			// The team outfit each player took at their last spawn.
 			std::unordered_map<int, int> spawnOutfits;
 			// Whether a set's file is there, asked once per file.

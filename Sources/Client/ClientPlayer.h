@@ -263,6 +263,10 @@ namespace spades {
 			Matrix4 GetEyeMatrix();
 			/** The file a body part is drawn from: the usual one, or the server's model set's. */
 			std::string ModelPart(const std::string& modelPath, const std::string& part);
+			/** "Models/Player/Custom/<set>/" of this player's outfit, or "". */
+			std::string OutfitFolder();
+			/** The colour this player's outfit is drawn in (PlayerOutfit.h). */
+			IntVector3 OutfitColor();
 		};
 	} // namespace client
 } // namespace spades

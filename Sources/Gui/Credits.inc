@@ -12,6 +12,8 @@ ZeroSpades X
 
 "Detank2002" - VR, the Quest 3 build, the training course
 "ATELSA" - VR testing, ideas
+"Serius_Sim" - the zombie and brute models
+"siecvi" - the zombie model
 
 
 Credits

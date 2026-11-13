@@ -27,6 +27,7 @@
 #include "Client.h"
 #include "ClientPlayer.h"
 #include "GameConstants.h"
+#include <Core/FileManager.h>
 #include <Core/VoxelModel.h>
 #include <Core/VoxelModelLoader.h>
 #include "GameMap.h"
@@ -176,6 +177,32 @@ namespace spades {
 			Vector3 xrayColor = MakeVector3(1, 1, 1);
 			std::map<IModel*, std::string> modelFiles;
 			std::vector<std::pair<std::string, Matrix4>>* capture = nullptr;
+			// The outfit's set, "Models/Player/Custom/<set>/", whose held items
+			// replace the usual ones (empty: none); and what each path gave.
+			std::string heldFolder;
+			std::map<std::string, Handle<IModel>> heldModels;
+
+			/** The model to draw for `model`: the outfit's own of the same item if it
+			 * has one (its Spade/Spade.kv6 for Models/Weapons/Spade/Spade.kv6),
+			 * else `model`. The skins load the usual files; this is where an
+			 * outfit's held items take their place, whatever the skin. */
+			IModel& HeldItem(IModel& model) {
+				static const std::string kWeapons = "Models/Weapons/";
+				if (heldFolder.empty())
+					return model;
+				auto file = modelFiles.find(&model);
+				if (file == modelFiles.end() || file->second.compare(0, kWeapons.size(), kWeapons) != 0)
+					return model;
+				const std::string path = heldFolder + file->second.substr(kWeapons.size());
+				auto it = heldModels.find(path);
+				if (it == heldModels.end()) {
+					Handle<IModel> own;
+					if (FileManager::FileExists(path.c_str()))
+						own = base->RegisterModel(path.c_str());
+					it = heldModels.emplace(path, own).first;
+				}
+				return it->second ? *it->second : model;
+			}
 
 			void OnProhibitedAction() {}
 
@@ -201,6 +228,8 @@ namespace spades {
 
 			void SetClipBox(const AABB3& b) { clipBox = b; }
 			void SetAllowDepthHack(bool h) { allowDepthHack = h; }
+			/** The outfit set whose held items are drawn from here on ("" none). */
+			void SetHeldItemFolder(std::string folder) { heldFolder = std::move(folder); }
 
 			/**
 			 * Makes every model submitted from here on draw again, in `color`, where it
@@ -289,9 +318,10 @@ namespace spades {
 					return;
 				}
 
-				auto bounds = (p.matrix * OBB3(model.GetBoundingBox())).GetBoundingAABB();
+				IModel& drawn = HeldItem(model);
+				auto bounds = (p.matrix * OBB3(drawn.GetBoundingBox())).GetBoundingAABB();
 				if (CheckVisibility(bounds))
-					base->RenderModel(model, p);
+					base->RenderModel(drawn, p);
 			}
 			void AddDebugLine(Vector3 a, Vector3 b, Vector4 color) { OnProhibitedAction(); }
 
@@ -724,6 +754,24 @@ namespace spades {
 			}
 		}
 
+		std::string ClientPlayer::OutfitFolder() {
+			if (!cg_customPlayerModels)
+				return "";
+			const PlayerOutfits& outfits = client.GetPlayerOutfits();
+			const std::string& name = outfits.GetModelName(player.GetId(), player.GetTeamId());
+			return name.empty() ? "" : "Models/Player/Custom/" + name + "/";
+		}
+
+		IntVector3 ClientPlayer::OutfitColor() {
+			// Set Outfit may dress a player in another team's colour (to look
+			// like one of them); their own otherwise.
+			const int team = player.GetTeamId();
+			const int worn = client.GetPlayerOutfits().GetColourTeam(player.GetId(), team);
+			if (worn != team && (worn == 0 || worn == 1) && client.GetWorld())
+				return client.GetWorld()->GetTeamColor(worn);
+			return player.GetColor();
+		}
+
 		std::string ClientPlayer::ModelPart(const std::string& modelPath, const std::string& part) {
 			// The usual file, unless the server has this player in an outfit whose
 			// model set has its own (PlayerOutfit.h).
@@ -824,7 +872,8 @@ namespace spades {
 
 			{
 				ScriptIToolSkin interface(skin);
-				interface.SetTeamColor(ConvertColorRGB(player.GetColor()));
+				interface.SetTeamColor(ConvertColorRGB(
+				  player.IsLocalPlayer() ? player.GetColor() : OutfitColor()));
 				interface.SetRaiseState(player.IsLocalPlayer() ? raiseState : 1.0F);
 				interface.SetSprintState(sprint);
 				interface.SetMuted(client.IsMuted());
@@ -996,6 +1045,8 @@ namespace spades {
 			);
 			sandboxedRenderer->SetClipBox(clip);
 			sandboxedRenderer->SetAllowDepthHack(true); // allow depthhack
+			// Your own view is the usual one, whatever you wear (the spec).
+			sandboxedRenderer->SetHeldItemFolder("");
 
 			// Nothing hides a player from their own eyes, and the flag persists on the
 			// sandbox between frames, so it has to be cleared and not merely not set.
@@ -1392,7 +1443,7 @@ namespace spades {
 
 			Handle<IModel> model;
 			ModelRenderParam param;
-			param.customColor = ConvertColorRGB(p.GetColor());
+			param.customColor = ConvertColorRGB(OutfitColor());
 
 			if (!p.IsAlive()) {
 				if (!cg_ragdoll) {
@@ -1415,6 +1466,7 @@ namespace spades {
 			);
 			sandboxedRenderer->SetClipBox(clip);
 			sandboxedRenderer->SetAllowDepthHack(false); // disable depthhack
+			sandboxedRenderer->SetHeldItemFolder(OutfitFolder());
 
 			// Reveal this player through walls when the client is showing them. The body
 			// parts below go straight to the renderer and carry the flag on `param`,

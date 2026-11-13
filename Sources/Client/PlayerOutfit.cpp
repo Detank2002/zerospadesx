@@ -30,13 +30,39 @@ namespace spades {
 		namespace {
 			const std::string kNone;
 
-			// The model set each outfit is drawn with, by its spec name, so art for
-			// one is a folder of that name; Undead is our zombie. One with no folder
-			// draws the usual parts.
-			const std::string kFolders[PlayerOutfits::NumOutfits] = {
-			  "",        "Zombie",  "Scout",     "Royal",   "Vampire", "Miner",
-			  "Ghillie", "Brawler", "Scientist", "Butcher", "Convict", "Builder",
-			  "Robot",   "God",     "Demon",     "Bodyguard", "Terrorist"};
+			// The model set each outfit is drawn with, so art for one is a folder
+			// under Models/Player/Custom: by its spec name, or the zombie role skins
+			// of zerospades-userskins (Serius_Sim's; the plain Zombie is siecvi's).
+			// One with no folder draws the usual parts.
+			const std::string kGrunts[] = {"ZombieGrunt1", "ZombieGrunt2", "ZombieGrunt3"};
+
+			const std::string& NamedFolder(int outfit) {
+				static const std::unordered_map<int, std::string> folders = {
+				  {PlayerOutfits::Scout, "Scout"},         {PlayerOutfits::Ghillie, "Ghillie"},
+				  {PlayerOutfits::Bodyguard, "Bodyguard"}, {PlayerOutfits::Terrorist, "Terrorist"},
+				  {PlayerOutfits::Convict, "Convict"},     {PlayerOutfits::Brawler, "Brawler"},
+				  {PlayerOutfits::Miner, "Miner"},         {PlayerOutfits::Builder, "Builder"},
+				  {PlayerOutfits::Scientist, "Scientist"}, {PlayerOutfits::Butcher, "Butcher"},
+				  {PlayerOutfits::Royal, "Royal"},         {PlayerOutfits::Robot, "Robot"},
+				  {PlayerOutfits::Vampire, "Vampire"},     {PlayerOutfits::Mummy, "Mummy"},
+				  {PlayerOutfits::Demon, "Demon"},         {PlayerOutfits::God, "God"},
+				  {PlayerOutfits::Mascot, "Mascot"},       {PlayerOutfits::Tiger, "Tiger"},
+				  {PlayerOutfits::Penguin, "Penguin"},     {PlayerOutfits::Bear, "Bear"},
+				  {PlayerOutfits::Unicorn, "Unicorn"},     {PlayerOutfits::TRex, "TRex"},
+				  {PlayerOutfits::Banana, "Banana"},       {PlayerOutfits::BlockStack, "BlockStack"},
+				  // Survive's brutes, each in its own colour
+				  {PlayerOutfits::Spitter, "ZombieSpitter"},
+				  {PlayerOutfits::Leaper, "ZombieLeaper"},
+				  {PlayerOutfits::Caller, "ZombiePurple"},
+				  {PlayerOutfits::Breaker, "ZombieYellow"},
+				  {PlayerOutfits::Toppler, "Zombie"},
+				  {PlayerOutfits::Turret, "Turret"},       {PlayerOutfits::Projector, "Projector"},
+				  {PlayerOutfits::DishAntenna, "DishAntenna"},
+				  {PlayerOutfits::MastAntenna, "MastAntenna"},
+				};
+				auto it = folders.find(outfit);
+				return it != folders.end() ? it->second : kNone;
+			}
 
 			// A part a set may leave out because another of its parts serves for it:
 			// the right leg is the left one, as the classic game drew both.
@@ -53,18 +79,28 @@ namespace spades {
 			}
 		} // namespace
 
-		const std::string& PlayerOutfits::FolderOf(int outfit) {
-			// 17-254 are reserved and drawn as 0.
-			if (outfit <= 0 || outfit >= NumOutfits)
-				return kNone;
-			return kFolders[outfit];
+		const std::string& PlayerOutfits::FolderOf(int outfit, int playerId) {
+			// The plain zombie: one of the grunts, the same one for a player id
+			if (outfit == Zombie)
+				return kGrunts[static_cast<unsigned>(playerId) % 3];
+			// An outfit with no art here (and the reserved numbers) is drawn as 0.
+			return NamedFolder(outfit);
 		}
 
-		void PlayerOutfits::SetPlayerOutfit(int playerId, int outfit) {
+		void PlayerOutfits::SetPlayerOutfit(int playerId, int outfit, int colourTeam) {
 			if (outfit == kTeamOutfit)
 				playerOutfits.erase(playerId);
 			else
 				playerOutfits[playerId] = outfit;
+			if (colourTeam == 0 || colourTeam == 1)
+				playerColours[playerId] = colourTeam;
+			else
+				playerColours.erase(playerId);
+		}
+
+		int PlayerOutfits::GetColourTeam(int playerId, int team) const {
+			auto it = playerColours.find(playerId);
+			return it != playerColours.end() ? it->second : team;
 		}
 
 		void PlayerOutfits::SetTeamOutfits(const std::unordered_map<int, int>& outfits) {
@@ -77,11 +113,13 @@ namespace spades {
 
 		void PlayerOutfits::PlayerLeft(int playerId) {
 			playerOutfits.erase(playerId);
+			playerColours.erase(playerId);
 			spawnOutfits.erase(playerId);
 		}
 
 		void PlayerOutfits::MapStarted() {
 			playerOutfits.clear();
+			playerColours.clear();
 			spawnOutfits.clear();
 		}
 
@@ -119,13 +157,17 @@ namespace spades {
 			int sub = r.ReadByte();
 			switch (sub) {
 				case PlayerOutfits::kSubSetOutfit: {
-					if (r.GetNumRemainingBytes() != 2) {
+					// Player, outfit and the colour worn; a server from before the
+					// colour sends only the first two.
+					const std::size_t size = r.GetNumRemainingBytes();
+					if (size != 3 && size != 2) {
 						SPLog("Dropped a Set Outfit of the wrong size");
 						return;
 					}
 					int player = r.ReadByte();
 					int outfit = r.ReadByte();
-					outfits.SetPlayerOutfit(player, outfit);
+					int colour = size == 3 ? r.ReadByte() : PlayerOutfits::kOwnColour;
+					outfits.SetPlayerOutfit(player, outfit, colour);
 				} break;
 				case PlayerOutfits::kSubTeamOutfits: {
 					if (r.GetNumRemainingBytes() % 2 != 0) {
