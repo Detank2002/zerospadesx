@@ -193,13 +193,24 @@ namespace spades {
 				auto file = modelFiles.find(&model);
 				if (file == modelFiles.end() || file->second.compare(0, kWeapons.size(), kWeapons) != 0)
 					return model;
-				const std::string path = heldFolder + file->second.substr(kWeapons.size());
-				auto it = heldModels.find(path);
+				// The set's Tool/ folder, every held item by its file name (Tool/
+				// Spade.kv6, Tool/Pickaxe.kv6), as zerospades-userskins lays them out;
+				// or a folder as the game's own (Spade/Spade.kv6).
+				const std::string sub = file->second.substr(kWeapons.size());
+				const std::size_t slash = sub.rfind('/');
+				const std::string key = heldFolder + sub;
+				auto it = heldModels.find(key);
 				if (it == heldModels.end()) {
 					Handle<IModel> own;
-					if (FileManager::FileExists(path.c_str()))
-						own = base->RegisterModel(path.c_str());
-					it = heldModels.emplace(path, own).first;
+					const std::string inTool =
+					  heldFolder + "Tool/" + (slash == std::string::npos ? sub : sub.substr(slash + 1));
+					for (const std::string& path : {inTool, key}) {
+						if (FileManager::FileExists(path.c_str())) {
+							own = base->RegisterModel(path.c_str());
+							break;
+						}
+					}
+					it = heldModels.emplace(key, own).first;
 				}
 				return it->second ? *it->second : model;
 			}
