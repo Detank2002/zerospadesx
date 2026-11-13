@@ -318,7 +318,8 @@ if(WIN32 AND USE_INTERNAL_OPENAL)
 endif()
 
 if(WIN32)
-	target_link_libraries(ZeroSpades ws2_32.lib winmm.lib)
+	# shell32: the file type registration tells the shell its associations changed
+	target_link_libraries(ZeroSpades ws2_32.lib winmm.lib shell32.lib advapi32.lib)
 elseif(UNIX AND NOT APPLE AND NOT ANDROID)
 	target_link_libraries(ZeroSpades Xext)
 endif()
@@ -363,6 +364,13 @@ if(APPLE)
 	# To sign: cmake -DMACOSX_CODESIGN_IDENTITY="Developer ID Application: Your Name" ..
 	# Local builds get ad-hoc signing inside bundle_macos_dylibs.sh — that's
 	# enough for the binary to launch on Apple Silicon.
+	# codesign refuses bundles carrying Finder or file-provider extended attributes
+	# ("resource fork, Finder information, or similar detritus not allowed"), which
+	# files pick up in synced folders such as an iCloud Desktop. Strip them first.
+	add_custom_command(TARGET ZeroSpades POST_BUILD
+		COMMAND xattr -cr "$<TARGET_BUNDLE_DIR:ZeroSpades>" || true
+		COMMENT "Clearing extended attributes from the macOS bundle"
+	)
 	if(MACOSX_CODESIGN_IDENTITY)
 		add_custom_command(TARGET ZeroSpades POST_BUILD
 			COMMAND codesign --force --deep --sign "${MACOSX_CODESIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:ZeroSpades>"

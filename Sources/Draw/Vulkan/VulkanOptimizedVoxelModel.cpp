@@ -299,7 +299,7 @@ namespace spades {
 					v[i].colorR = r;
 					v[i].colorG = g;
 					v[i].colorB = b;
-					v[i].padding = emissive ? 1 : 0; // location 5: the emissive flag
+					v[i].positionPadding = emissive ? 1 : 0; // location 5: the emissive flag
 				}
 
 				// Per-face geometry + AO sample axes (u along v[0]→v[1], v along v[0]→v[3]).
@@ -537,7 +537,7 @@ namespace spades {
 			VkVertexInputAttributeDescription attr{};
 			attr.binding = 0;
 			attr.location = 0;
-			attr.format = VK_FORMAT_R8G8B8_UINT;
+			attr.format = VK_FORMAT_R16G16B16A16_UINT;
 			attr.offset = offsetof(Vertex, x);
 
 			VkPipelineVertexInputStateCreateInfo vertexInput{};
@@ -1009,7 +1009,7 @@ namespace spades {
 			// Position (location 0)
 			attributeDescriptions[0].binding = 0;
 			attributeDescriptions[0].location = 0;
-			attributeDescriptions[0].format = VK_FORMAT_R8G8B8_UINT;
+			attributeDescriptions[0].format = VK_FORMAT_R16G16B16A16_UINT;
 			attributeDescriptions[0].offset = offsetof(Vertex, x);
 
 			// Color (location 1)
@@ -1024,10 +1024,10 @@ namespace spades {
 			attributeDescriptions[2].format = VK_FORMAT_R8G8B8_SINT;
 			attributeDescriptions[2].offset = offsetof(Vertex, nx);
 
-			// aoX (location 3) and aoY (location 4) are sub-byte fields in the
-			// otherwise-padded spaces after position and color. They live on
-			// separate non-adjacent offsets so we bind them as two R8_UINT
-			// attributes rather than one packed R8G8.
+			// aoX (location 3) and aoY (location 4) are the fourth bytes of the
+			// colour's and the normal's words. They live on separate non-adjacent
+			// offsets so we bind them as two R8_UINT attributes rather than one
+			// packed R8G8.
 			attributeDescriptions[3].binding = 0;
 			attributeDescriptions[3].location = 3;
 			attributeDescriptions[3].format = VK_FORMAT_R8_UINT;
@@ -1038,11 +1038,11 @@ namespace spades {
 			attributeDescriptions[4].format = VK_FORMAT_R8_UINT;
 			attributeDescriptions[4].offset = offsetof(Vertex, aoY);
 
-			// The emissive flag (location 5), in the byte after the normal.
+			// The emissive flag (location 5), in the position's fourth, spare, component.
 			attributeDescriptions[5].binding = 0;
 			attributeDescriptions[5].location = 5;
-			attributeDescriptions[5].format = VK_FORMAT_R8_UINT;
-			attributeDescriptions[5].offset = offsetof(Vertex, padding);
+			attributeDescriptions[5].format = VK_FORMAT_R16_UINT;
+			attributeDescriptions[5].offset = offsetof(Vertex, positionPadding);
 
 			VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

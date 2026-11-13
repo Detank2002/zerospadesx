@@ -573,10 +573,10 @@ namespace spades {
 
 			device.BindBuffer(IGLDevice::ArrayBuffer, buffer);
 			device.VertexAttribPointer(positionAttribute(), 4,
-				IGLDevice::UnsignedByte, false, sizeof(Vertex), (void*)0);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)0);
 			if (normalAttribute() != -1)
 				device.VertexAttribPointer(normalAttribute(), 3,
-					IGLDevice::Byte, false, sizeof(Vertex), (void*)8);
+					IGLDevice::Byte, false, sizeof(Vertex), (void*)12);
 			device.BindBuffer(IGLDevice::ArrayBuffer, 0);
 
 			device.EnableVertexAttribArray(positionAttribute(), true);
@@ -696,6 +696,10 @@ namespace spades {
 			sunPos = sunPos.Normalize();
 			sunLightDirection.SetValue(sunPos.x, sunPos.y, sunPos.z);
 
+			static GLProgramUniform flatLighting("flatLighting");
+			flatLighting(program);
+			flatLighting.SetValue(renderer.GetSceneDef().flatModelLighting ? 1.0F : 0.0F);
+
 			static GLProgramUniform viewOriginVector("viewOriginVector");
 			viewOriginVector(program);
 			viewOriginVector.SetValue(viewOrigin.x, viewOrigin.y, viewOrigin.z);
@@ -710,11 +714,11 @@ namespace spades {
 
 			device.BindBuffer(IGLDevice::ArrayBuffer, buffer);
 			device.VertexAttribPointer(positionAttribute(), 4,
-				IGLDevice::UnsignedByte, false, sizeof(Vertex), (void*)0);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)0);
 			device.VertexAttribPointer(textureCoordAttribute(), 2,
-				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)4);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)8);
 			device.VertexAttribPointer(normalAttribute(), 3,
-				IGLDevice::Byte, false, sizeof(Vertex), (void*)8);
+				IGLDevice::Byte, false, sizeof(Vertex), (void*)12);
 			device.BindBuffer(IGLDevice::ArrayBuffer, 0);
 
 			device.EnableVertexAttribArray(positionAttribute(), true);
@@ -848,11 +852,11 @@ namespace spades {
 
 			device.BindBuffer(IGLDevice::ArrayBuffer, buffer);
 			device.VertexAttribPointer(positionAttribute(), 4,
-				IGLDevice::UnsignedByte, false, sizeof(Vertex), (void*)0);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)0);
 			device.VertexAttribPointer(textureCoordAttribute(), 2,
-				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)4);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)8);
 			device.VertexAttribPointer(normalAttribute(), 3,
-				IGLDevice::Byte, false, sizeof(Vertex), (void*)8);
+				IGLDevice::Byte, false, sizeof(Vertex), (void*)12);
 			device.BindBuffer(IGLDevice::ArrayBuffer, 0);
 
 			device.EnableVertexAttribArray(positionAttribute(), true);
@@ -985,7 +989,7 @@ namespace spades {
 
 			device.BindBuffer(IGLDevice::ArrayBuffer, buffer);
 			device.VertexAttribPointer(positionAttribute(), 4,
-				IGLDevice::UnsignedByte, false, sizeof(Vertex), (void*)0);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)0);
 			device.BindBuffer(IGLDevice::ArrayBuffer, 0);
 
 			device.EnableVertexAttribArray(positionAttribute(), true);
@@ -1108,11 +1112,11 @@ namespace spades {
 
 			device.BindBuffer(IGLDevice::ArrayBuffer, buffer);
 			device.VertexAttribPointer(positionAttribute(), 4,
-				IGLDevice::UnsignedByte, false, sizeof(Vertex), (void*)0);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)0);
 			device.VertexAttribPointer(textureCoordAttribute(), 2,
-				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)4);
+				IGLDevice::UnsignedShort, false, sizeof(Vertex), (void*)8);
 			device.VertexAttribPointer(normalAttribute(), 3,
-				IGLDevice::Byte, false, sizeof(Vertex), (void*)8);
+				IGLDevice::Byte, false, sizeof(Vertex), (void*)12);
 			device.BindBuffer(IGLDevice::ArrayBuffer, 0);
 
 			device.EnableVertexAttribArray(positionAttribute(), true);

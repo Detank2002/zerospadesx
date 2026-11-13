@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <Gui/UI/MainScreen/DemoListView.h>
+#include <Gui/UI/MainScreen/EditorBrowserPanel.h>
 #include <Gui/UI/MainScreen/ModListView.h>
 #include <Gui/UI/MainScreen/ServerListView.h>
 #include <Gui/UI/Widgets/Button.h>
@@ -55,26 +56,6 @@ namespace spades {
 		class TabPanel : public ui::UIElement {
 		public:
 			TabPanel(ui::UIManager* manager) : ui::UIElement(manager) {}
-		};
-
-		/** Modal dialog for renaming a demo file. */
-		class RenameScreen : public ui::UIElement {
-			ui::UIElement* owner; // weak
-			ui::Field* nameField; // weak; owned as a child
-
-			void OnConfirm(ui::UIElement& sender);
-			void OnCancel(ui::UIElement& sender);
-
-		public:
-			ui::EventHandler closed;
-			bool result = false;
-			std::string newName;
-
-			RenameScreen(ui::UIElement* owner, const std::string& currentName);
-
-			void Close();
-			void Run();
-			void HotKey(const std::string& key) override;
 		};
 
 		/**
@@ -131,6 +112,9 @@ namespace spades {
 			float demoSizeColWidth;
 			float demoContentsWidth;
 
+			// Editor tab state (self-contained file-browser panel)
+			EditorBrowserPanel* editorPanel;
+
 			// Mods tab state
 			Handle<ModsScreenHelper> modsHelper;
 			TabPanel* modsPanel;
@@ -183,6 +167,12 @@ namespace spades {
 			void ShowTab(int index);
 
 			void OnTabChanged(ui::UIElement& sender);
+
+		public:
+			/** Re-reads the listing of the tab currently on screen. */
+			void RefreshVisibleTab();
+
+		private:
 			int EnabledIndex(const std::vector<std::string>& enabled, const std::string& name);
 			void UpdateModsStatus();
 			void OnDownloadModsPressed(ui::UIElement& sender);
@@ -215,9 +205,11 @@ namespace spades {
 			void OnAddressChanged(ui::UIElement& sender);
 			void SetProtocolVersion(int ver);
 
+			void ConfirmQuit();
 			void OnQuitPressed(ui::UIElement& sender);
 			void OnCreditsPressed(ui::UIElement& sender);
 			void OnSetupPressed(ui::UIElement& sender);
+			void OpenLink(const std::string& url);
 			void Connect();
 
 		public:

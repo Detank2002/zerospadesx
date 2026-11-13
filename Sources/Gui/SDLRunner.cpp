@@ -24,6 +24,11 @@
 
 #include "SDLRunner.h"
 
+#include <Client/ScreenShot.h>
+#include <Gui/Utils/DisplayUtils.h>
+
+#include "AutomationOptions.h"
+
 #include <Gui/Utils/Icon.h>
 #ifdef USE_OPENGL
 #include "SDLGLDevice.h"
@@ -208,18 +213,33 @@ namespace spades {
 					break;
 				case SDL_KEYUP: view.KeyEvent(TranslateKey(event.key.keysym), false); break;
 				case SDL_TEXTINPUT: view.TextInputEvent(event.text.text); break;
+				// A file is opened with this program at startup, not by dropping it on
+				// a running one. The name still has to be released: SDL allocated it
+				// for a receiver, and here there is none.
+				case SDL_DROPFILE: SDL_free(event.drop.file); break;
 				case SDL_TEXTEDITING:
 					view.TextEditingEvent(event.edit.text, event.edit.start, event.edit.length);
 					break;
 				case SDL_WINDOWEVENT:
-					if (event.window.type == SDL_WINDOWEVENT_FOCUS_GAINED) {
-						SDL_SetRelativeMouseMode(SDL_TRUE);
+					if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+						// Only grab the mouse back if the view wants it grabbed: menus
+						// use an absolute cursor. This matches the state the client
+						// loop last set, so its cached mode stays in sync.
+						SDL_SetRelativeMouseMode(view.NeedsAbsoluteMouseCoordinate() ? SDL_FALSE
+						                                                               : SDL_TRUE);
 						SDL_ShowCursor(SDL_DISABLE);
 						m_active = true;
-					} else if (event.window.type == SDL_WINDOWEVENT_FOCUS_LOST) {
+					} else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
 						SDL_SetRelativeMouseMode(SDL_FALSE);
 						SDL_ShowCursor(SDL_ENABLE);
 						m_active = false;
+					}
+					if (event.window.event == SDL_WINDOWEVENT_MOVED) {
+						// Remember the monitor the window was dragged onto, so the next
+						// window (the game's, or the setup's on the next launch) opens there.
+						SDL_Window* window = SDL_GetWindowFromID(event.window.windowID);
+						if (window)
+							display::SetPreferredDisplay(display::GetWindowDisplay(window));
 					}
 					break;
 				default: break;
@@ -231,6 +251,8 @@ namespace spades {
 			{
 				Handle<View> view(CreateView(renderer, audio), false);
 				Uint32 ot = SDL_GetTicks();
+				const Uint32 startTicks = ot;
+				bool quitAfterFrame = false;
 
 				bool running = true;
 				bool lastShift = false;
@@ -325,12 +347,32 @@ namespace spades {
 						// never run between drawing the frame and swapping it.
 						SamplingProfiler::MarkStage(2);
 						renderer->FrameDone();
+
+						// --screenshot-quit: the frame drawn that long after the start
+						// is saved, and the program quits.
+						const float screenshotAfter = Automation().screenshotQuitAfter;
+						if (screenshotAfter >= 0.0F &&
+						    float(SDL_GetTicks() - startTicks) / 1000.0F >= screenshotAfter) {
+							try {
+								SPLog("Screenshot taken before quitting: %s",
+								      client::SaveScreenShot(*renderer).c_str());
+							} catch (const std::exception& ex) {
+								SPLog("[!] Screenshot before quitting failed: %s", ex.what());
+							}
+							quitAfterFrame = true;
+						}
+
 						renderer->Flip();
 
 						SamplingProfiler::MarkStage(3);
 						view->RunFrameLate((float)dt / 1000.0F);
 					}
 
+					if (quitAfterFrame) {
+						view->Closing();
+						SPLog("Quitting after the screenshot (--screenshot-quit)");
+						break;
+					}
 #if USE_OPENXR
 					// Flip ends the headset frame; this only catches a frame no
 					// renderer picked up, so the runtime is never left waiting.
@@ -631,6 +673,65 @@ namespace spades {
 			}
 		}
 
+		void SDLRunner::AutoSizeWindow(int displayIndex, bool fullscreen, int& x, int& y,
+		                               int& width, int& height) {
+			if (fullscreen) {
+				// The monitor's own mode, so going fullscreen switches no mode.
+				display::Resolution res;
+				if (display::GetDesktopResolution(displayIndex, res)) {
+					width = res.width;
+					height = res.height;
+				}
+			} else {
+				// As large as the monitor allows without going under the taskbar, dock
+				// or menu bar. Decorations are taken off once the window exists.
+				display::Rect area;
+				if (display::GetUsableBounds(displayIndex, area)) {
+					x = area.x;
+					y = area.y;
+					width = area.width;
+					height = area.height;
+				}
+			}
+			SPLog("Auto resolution: %dx%d on display %d (%s)", width, height, displayIndex,
+			      fullscreen ? "fullscreen" : "windowed");
+		}
+
+		void SDLRunner::FitWindowToDisplay(SDL_Window* window, int displayIndex) {
+			// Done before the renderer exists: the software renderer keeps the window
+			// surface it was created with, so the size has to be final by then.
+
+			// Some window systems (Wayland) choose the monitor themselves.
+			int actual = SDL_GetWindowDisplayIndex(window);
+			if (actual >= 0 && actual != displayIndex) {
+				SPLog("The window opened on display %d, not %d; fitting it there", actual,
+				      displayIndex);
+				displayIndex = actual;
+			}
+
+			display::Rect area;
+			if (!display::GetUsableBounds(displayIndex, area))
+				return;
+			int x = area.x, y = area.y, w = area.width, h = area.height;
+
+#if SDL_VERSION_ATLEAST(2, 0, 5)
+			// The title bar and frame come on top of the size we ask for. X11 window
+			// managers report them asynchronously, hence the pump.
+			SDL_PumpEvents();
+			int top = 0, left = 0, bottom = 0, right = 0;
+			if (SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) == 0) {
+				x += left;
+				y += top;
+				w -= left + right;
+				h -= top + bottom;
+			}
+#endif
+			if (w < 320 || h < 240)
+				return; // nonsense from the window system; keep what SDL made
+			SDL_SetWindowSize(window, w, h);
+			SDL_SetWindowPosition(window, x, y);
+		}
+
 		void SDLRunner::Run(int width, int height) {
 			SPADES_MARK_FUNCTION();
 
@@ -679,7 +780,12 @@ namespace spades {
 				Uint32 sdlFlags = 0;
 				switch (rtype) {
 					case RendererType::GL:
-						sdlFlags = SDL_WINDOW_OPENGL;
+						// High-DPI: the window keeps its size in window units (layout and
+						// mouse input are unchanged) while the GL framebuffer gets every
+						// pixel the display has. The GL renderer reads both sizes from
+						// SDLGLDevice. The SW renderer blits a window surface sized in
+						// window units, so it stays out of this.
+						sdlFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
 						SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 						SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 						SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
@@ -687,7 +793,10 @@ namespace spades {
 							SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
 						break;
 					case RendererType::Vulkan:
-						sdlFlags = SDL_WINDOW_VULKAN;
+						// High-DPI as GL: the swapchain takes the drawable's
+						// pixels (SDL_Vulkan_GetDrawableSize) while the window,
+						// the 2D layer and the mouse stay in window units.
+						sdlFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_ALLOW_HIGHDPI;
 						break;
 					case RendererType::SW: sdlFlags = 0; break;
 				}
@@ -707,13 +816,31 @@ namespace spades {
 #endif
 				}
 
-				SDL_Window* window = SDL_CreateWindow(caption.c_str(),
-					SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-					width, height, sdlFlags);
+				// Open on the monitor the setup window was last shown on. In fullscreen
+				// mode SDL switches that monitor, not the primary one.
+				int displayIndex = display::GetPreferredDisplay();
+				int x = SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex);
+				int y = SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex);
+				// The setup window keeps its own size; the game follows its monitor.
+				bool autoSize = !m_hasSystemMenu && display::IsAutoResolution();
+				bool fullscreen = (sdlFlags & SDL_WINDOW_FULLSCREEN) != 0;
+				if (autoSize)
+					AutoSizeWindow(displayIndex, fullscreen, x, y, width, height);
+
+				SDL_Window* window =
+				  SDL_CreateWindow(caption.c_str(), x, y, width, height, sdlFlags);
 
 				if (!window) {
 					std::string msg = SDL_GetError();
 					SPRaise("Failed to create graphics window: %s", msg.c_str());
+				}
+
+				if (autoSize && !fullscreen)
+					FitWindowToDisplay(window, displayIndex);
+				if (autoSize) {
+					SDL_GetWindowSize(window, &width, &height);
+					r_videoWidth = width;
+					r_videoHeight = height;
 				}
 
 #ifdef __APPLE__
@@ -761,7 +888,9 @@ namespace spades {
 							                                   : "immediate");
 					}
 
+					WindowCreated(window);
 					RunClientLoop(window, renderer.GetPointerOrNull(), audio.GetPointerOrNull());
+					WindowDestroying(window);
 
 #if USE_OPENXR
 					// The session holds the Vulkan device; it has to go first.

@@ -287,6 +287,14 @@ namespace spades {
 			return v;
 		}
 
+		/**
+		 * The component on axis `i` (0 = x, 1 = y, 2 = z). Reaching y or z
+		 * through `(&v.x)[i]` instead is undefined: an optimizing compiler may
+		 * assume only x is ever touched, and drop the rest.
+		 */
+		float& operator[](int i) { return i == 0 ? x : (i == 1 ? y : z); }
+		const float& operator[](int i) const { return i == 0 ? x : (i == 1 ? y : z); }
+
 		Vector3 operator+(const Vector3& v) const { return Make(x + v.x, y + v.y, z + v.z); }
 		Vector3 operator-(const Vector3& v) const { return Make(x - v.x, y - v.y, z - v.z); }
 		Vector3 operator*(const Vector3& v) const { return Make(x * v.x, y * v.y, z * v.z); }
@@ -646,6 +654,7 @@ namespace spades {
 		static Matrix4 Scale(float);
 		static Matrix4 Scale(Vector3);
 		static Matrix4 Scale(float, float, float);
+		static Matrix4 FromEulerAngles(Vector3 angles);
 
 		Matrix4 Transposed() const;
 		Matrix4 Inversed() const;
@@ -936,6 +945,13 @@ namespace spades {
 
 #pragma mark - Utilities
 
+	// easing functions, they expect a normalized time in [0, 1] (no clamping is done)
+	float EaseInQuad(float t);
+	float EaseOutQuad(float t);
+	float EaseInCubic(float t);
+	float EaseOutCubic(float t);
+
+	float Ramp(float x, float a, float b);
 	float SmoothStep(float);
 	float Mix(float a, float b, float frac);
 	Vector2 Mix(const Vector2& a, const Vector2& b, float frac);

@@ -18,6 +18,7 @@
 
  */
 
+#include <algorithm>
 #include <cmath>
 
 #include "SceneDefinition.h"
@@ -39,6 +40,22 @@ namespace spades {
 			float far = this->zFar;
 			const FovTangents f = GetFovTangents();
 			float c = far - near;
+
+			if (orthogonal) {
+				// The same view, without the perspective divide: a box rather
+				// than a pyramid, as wide as it is tall times the shape the
+				// field of view gives the viewport.
+				const float halfHeight = std::max(orthoHeight * 0.5F, 1.0e-4F);
+				const float halfWidth = halfHeight * (f.right / f.up);
+				Matrix4 ortho;
+				std::fill(ortho.m, ortho.m + 16, 0.0F);
+				ortho.m[0] = 1.0F / halfWidth;
+				ortho.m[5] = 1.0F / halfHeight;
+				ortho.m[10] = -2.0F / c;
+				ortho.m[14] = -(far + near) / c;
+				ortho.m[15] = 1.0F;
+				return ortho;
+			}
 
 			Matrix4 mat;
 			mat.m[0] = 2.0F / f.Width();
@@ -69,6 +86,21 @@ namespace spades {
 			float far = this->zFar;
 			const FovTangents f = GetFovTangents();
 			float c = far - near;
+
+			if (orthogonal) {
+				// As ToOpenGLProjectionMatrix's box, its depth running from 0 at
+				// the near plane to 1 at the far one.
+				const float halfHeight = std::max(orthoHeight * 0.5F, 1.0e-4F);
+				const float halfWidth = halfHeight * (f.right / f.up);
+				Matrix4 ortho;
+				std::fill(ortho.m, ortho.m + 16, 0.0F);
+				ortho.m[0] = 1.0F / halfWidth;
+				ortho.m[5] = 1.0F / halfHeight;
+				ortho.m[10] = -1.0F / c;
+				ortho.m[14] = -near / c;
+				ortho.m[15] = 1.0F;
+				return ortho;
+			}
 
 			Matrix4 mat;
 			mat.m[0] = 2.0F / f.Width();

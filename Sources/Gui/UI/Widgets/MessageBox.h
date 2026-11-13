@@ -27,16 +27,26 @@
 
 namespace spades {
 	namespace gui {
+		namespace ui {
+			class Button;
+		}
+
 		/**
 		 * A modal dialog with a text body and a row of buttons. While shown it
 		 * disables its owner; `resultIndex` is the pressed button (or -1).
 		 */
 		class MessageBoxScreen : public ui::UIElement {
-			float contentsTop, contentsHeight;
+			AABB2 contents; // where the shared dialog chrome put our widgets
 
 			ui::UIElement* owner; // weak
 
+			std::vector<ui::Button*> buttonWidgets; // weak; owned as children
+
 			void OnClosed();
+
+		protected:
+			/** Shows `text` (e.g. "[Enter]") on the button at `index`, to advertise its hot key. */
+			void SetButtonHotKeyText(size_t index, const std::string& text);
 
 		public:
 			ui::EventHandler closed;

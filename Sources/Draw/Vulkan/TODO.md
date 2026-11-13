@@ -18,6 +18,21 @@ Open work only; what is done is in the git history. The GL renderer in
       sampled through `sceneDepthSampleImage` (a D32 image read through `sampler2D`
       returned 0 on MoltenVK), then drop the workaround once Fog2 matches.
 
+## Renderer contract of the UI scale / high-DPI work
+
+The 2D layer is in window units and the swapchain in pixels, as in GL: the
+window is a high-DPI one, `ScreenPixelRatio()` is the swapchain's pixels per
+window unit, clip rectangles are converted for the scissor, and both sizes are
+re-read whenever the swapchain is made again. What is left of that contract:
+
+- [ ] **`CreateImageWithoutMipmaps`**, once `IRenderer` has it: an image created
+      with `mipLevels = 1` (the 6x8 pixel font's enlarged atlases); the default
+      falls back to `CreateImage`, whose mip chain blurs that font at fractional
+      scales.
+- [ ] **Screenshots hold the scene only** — `ReadBitmap` reads the scene's
+      resolved colour image, so a screenshot leaves out the 2D layer GL's
+      includes (the model editor's bars, the HUD).
+
 ## Unscheduled ideas
 
 Pipeline derivatives for the three water programs; merging compatible render

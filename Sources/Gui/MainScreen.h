@@ -34,6 +34,7 @@ namespace spades {
 	namespace gui {
 		class MainScreenHelper;
 		class MainScreenUI;
+		class SoftwareCursor;
 		class MainScreen : public View {
 			friend class MainScreenHelper;
 			Handle<client::IRenderer> renderer;
@@ -47,6 +48,11 @@ namespace spades {
 
 			void DrawStartupScreen();
 			void DoInit();
+			/** Opens a file in its editor, reporting a failure the way the
+			 *  main screen reports any other. */
+			void OpenDocumentFile(const std::string& path);
+			/** A file to open once the UI exists; empty once it has been. */
+			std::string pendingDocumentPath;
 
 			void RestoreRenderer();
 
@@ -64,13 +70,20 @@ namespace spades {
 
 			std::string Connect(const ServerAddress &host);
 		std::string PlayDemo(const std::string &demoPath);
+			/** Opens `path` in the editor for its type (see DocumentTypes), creating
+			 *  the document when `isNew`. An empty string on success, else what
+			 *  went wrong. */
+			std::string OpenEditor(const std::string &path, bool isNew, SoftwareCursor* cursor = nullptr);
 
 		protected:
 			~MainScreen();
 
 		public:
+			/** `openDocumentPath`, when given, is a file to open in its editor as
+			 *  soon as the screen is ready, instead of showing the menus. */
 			MainScreen(Handle<client::IRenderer>, Handle<client::IAudioDevice>,
-			           Handle<client::FontManager>);
+			           Handle<client::FontManager>,
+			           const std::string& openDocumentPath = std::string());
 
 			client::IRenderer *GetRenderer() { return &*renderer; }
 			client::IAudioDevice *GetAudioDevice() { return &*audioDevice; }

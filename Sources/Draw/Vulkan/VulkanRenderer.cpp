@@ -684,11 +684,13 @@ namespace spades {
 		if (vrRenderExtent.width > 0 && vrRenderExtent.height > 0)
 			return vrRenderExtent;
 
-		// As GL: the window's size scaled by r_scale, kept within [0.2, 1], and
-		// at least a pixel either way
+		// As GL: the framebuffer's size in pixels, which on a high-DPI display is
+		// more than the window's in its own units, scaled by r_scale, kept within
+		// [0.2, 1], and at least a pixel either way
 		const float scale = std::max(0.2F, std::min(1.0F, static_cast<float>(r_scale)));
-		const int width = std::max(1, static_cast<int>(device->ScreenWidth() * scale));
-		const int height = std::max(1, static_cast<int>(device->ScreenHeight() * scale));
+		const VkExtent2D pixels = device->GetSwapchainExtent();
+		const int width = std::max(1, static_cast<int>(pixels.width * scale));
+		const int height = std::max(1, static_cast<int>(pixels.height * scale));
 		return VkExtent2D{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
 	}
 
@@ -743,12 +745,44 @@ namespace spades {
 			projectionViewMatrix = projectionMatrix * viewMatrix;
 		}
 
+		// The outline pass runs when the settings ask for it or the scene does,
+		// as in GL: the model editor's flat lighting drops the shading that
+		// conveys depth, and a silhouette gives it back.
+		bool VulkanRenderer::OutlinesWanted() const {
+			return (int)r_outlines != 0 || sceneDef.forceOutlines;
+		}
+
+		// Whether the scene draws the water surface and the mirrored scene that
+		// feeds it; a scene may leave them out (SceneDefinition::skipWater).
+		bool VulkanRenderer::WaterWanted(int level) {
+			return (int)settings.r_water >= level && !sceneDef.skipWater;
+		}
+
 		void VulkanRenderer::BuildFrustrum() {
 			// near/far planes
 			frustrum[0] = Plane3::PlaneWithPointOnPlane(sceneDef.viewOrigin, sceneDef.viewAxis[2]);
 			frustrum[1] = frustrum[0].Flipped();
 			frustrum[0].w -= sceneDef.zNear;
 			frustrum[1].w += sceneDef.zFar;
+
+			if (sceneDef.orthogonal) {
+				// A box, not a pyramid: the sides are parallel to the line of
+				// sight and stand half the view's height and width out from it.
+				const float halfHeight = sceneDef.orthoHeight * 0.5F;
+				const float halfWidth =
+				  halfHeight * (std::tan(sceneDef.fovX * 0.5F) / std::tan(sceneDef.fovY * 0.5F));
+				const Vector3& side = sceneDef.viewAxis[0];
+				const Vector3& up = sceneDef.viewAxis[1];
+				frustrum[2] = Plane3::PlaneWithPointOnPlane(
+				  sceneDef.viewOrigin - side * halfWidth, side);
+				frustrum[3] = Plane3::PlaneWithPointOnPlane(
+				  sceneDef.viewOrigin + side * halfWidth, -side);
+				frustrum[4] =
+				  Plane3::PlaneWithPointOnPlane(sceneDef.viewOrigin - up * halfHeight, up);
+				frustrum[5] =
+				  Plane3::PlaneWithPointOnPlane(sceneDef.viewOrigin + up * halfHeight, -up);
+				return;
+			}
 
 			// side planes, each through the eye and one edge, facing in. An edge at
 			// tangent t along axis a has the inward normal (front * t - a) for the
@@ -1107,6 +1141,7 @@ namespace spades {
 			// The water's reflection keeps what lies above the water plane at 63.
 			parameters.mirrorClipZ = renderingMirror ? 63.0F : 1.0e9F;
 			parameters.sunDirection = GetSunDirection();
+			parameters.flatModelLighting = sceneDef.flatModelLighting;
 			// Not in the scope's view: the occlusion is worked out from the eyes'
 			// targets, at their size
 			parameters.ambientOcclusion =
@@ -1437,6 +1472,23 @@ namespace spades {
 				glareRenderer->Add(*vkImage, param);
 		}
 
+		void VulkanRenderer::AddImagePlane(client::IImage& img, Vector3 origin, Vector3 axisU,
+		                                   Vector3 axisV) {
+			SPADES_MARK_FUNCTION();
+			EnsureInitialized();
+			EnsureSceneStarted();
+
+			VulkanImage* vkImage = nullptr;
+			if (VulkanImageWrapper* wrapper = dynamic_cast<VulkanImageWrapper*>(&img))
+				vkImage = wrapper->GetVulkanImage();
+			else
+				vkImage = dynamic_cast<VulkanImage*>(&img);
+
+			if (vkImage && longSpriteRenderer)
+				longSpriteRenderer->AddPlane(vkImage, origin, axisU, axisV,
+				                             drawColorAlphaPremultiplied);
+		}
+
 		void VulkanRenderer::AddLongSprite(client::IImage& img, Vector3 p1, Vector3 p2, float radius) {
 			SPADES_MARK_FUNCTION();
 			EnsureInitialized();
@@ -1716,6 +1768,23 @@ namespace spades {
 
 			Canvas2D()->AddTriangle(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y, col.x, col.y, col.z,
 			                           col.w);
+		}
+
+		void VulkanRenderer::DrawShadedTriangle(const Vector2& v0, const Vector2& v1,
+		                                        const Vector2& v2, const Vector4& c0,
+		                                        const Vector4& c1, const Vector4& c2) {
+			SPADES_MARK_FUNCTION();
+
+			EnsureSceneNotStarted();
+
+			VulkanImage* img = whiteImage.GetPointerOrNull();
+			if (!img || !imageRenderer)
+				return;
+
+			// The colours arrive alpha-premultiplied and the draw colour is not
+			// used, as in GLRenderer.
+			imageRenderer->SetImage(img);
+			imageRenderer->AddShadedTriangle(v0, v1, v2, c0, c1, c2);
 		}
 
 		void VulkanRenderer::DrawFilledRectFade(float x0, float y0, float x1, float y1,
@@ -2145,10 +2214,6 @@ namespace spades {
 			return static_cast<float>(uiHeight);
 		}
 
-		float VulkanRenderer::GetUIPixelRatio() {
-			return vrUILayout ? static_cast<float>(uiPixelRatio) : 1.0F;
-		}
-
 		bool VulkanRenderer::SetVRCanvas(int canvas) {
 			if (canvas == 0) {
 				vrCanvas = 0;
@@ -2190,6 +2255,20 @@ namespace spades {
 			return device->GetSwapchainExtent();
 		}
 
+		// The swapchain's pixels per unit of the 2D layer: above 1 on a high-DPI
+		// display, where text and anything else sized in device pixels asks for
+		// it to stay sharp.
+		float VulkanRenderer::ScreenPixelRatio() {
+			// In a headset the 2D layer (and the panels drawn like it) is drawn
+			// at its own supersampling, whatever the window shows.
+			if (vrUILayout)
+				return static_cast<float>(uiPixelRatio);
+			const float units = ScreenWidth();
+			if (units <= 0.0F)
+				return 1.0F;
+			return static_cast<float>(device->GetSwapchainExtent().width) / units;
+		}
+
 		client::RendererInfo VulkanRenderer::GetRendererInfo() {
 			VkPhysicalDeviceProperties props;
 			vkGetPhysicalDeviceProperties(device->GetPhysicalDevice(), &props);
@@ -2217,7 +2296,9 @@ namespace spades {
 			}
 
 			// Only worth reporting when the scene is rendered at a scale other than 1.
-			if (renderWidth != device->ScreenWidth() || renderHeight != device->ScreenHeight()) {
+			const VkExtent2D pixels = device->GetSwapchainExtent();
+			if (static_cast<uint32_t>(renderWidth) != pixels.width ||
+			    static_cast<uint32_t>(renderHeight) != pixels.height) {
 				info.renderWidth = renderWidth;
 				info.renderHeight = renderHeight;
 			}
@@ -2406,7 +2487,7 @@ namespace spades {
 				waterRenderer->UploadWaveTextures(commandBuffer);
 				// Counted only for the reflections, which ask for it
 				waterRenderer->BeginOcclusionQueryFrame(
-				  commandBuffer, (int)r_occlusionQuery && (int)settings.r_water >= 2);
+				  commandBuffer, (int)r_occlusionQuery && WaterWanted(2));
 			}
 
 
@@ -2481,7 +2562,7 @@ namespace spades {
 		}
 
 		// Render mirror pass for water reflections (r_water >= 2)
-		if (sceneUsedInThisFrame && framebufferManager && waterRenderer && (int)settings.r_water >= 2 &&
+		if (sceneUsedInThisFrame && framebufferManager && waterRenderer && WaterWanted(2) &&
 		    !vrScopePass) {
 			renderingMirror = true;
 
@@ -2722,13 +2803,13 @@ namespace spades {
 			// When the water pass will run, defer them to it (same render pass, the
 			// pipelines are render-pass-compatible); otherwise draw them here.
 			const bool willRenderWater =
-			  !vrScopePass && (int)settings.r_water > 0 && waterRenderer && framebufferManager;
+			  !vrScopePass && WaterWanted(1) && waterRenderer && framebufferManager;
 			// The water in this pass, reading no copy of the scene (r_waterInScene):
 			// no second pass, and the overlays follow it here. The scope's view
 			// too: after a pass resolved in itself (r_resolveInPass) the water's
 			// own pass would load a scene never stored, and resolve that over
 			// the picture (the scope all black, testers' report).
-			const bool waterInScene = (int)settings.r_water > 0 && waterRenderer &&
+			const bool waterInScene = WaterWanted(1) && waterRenderer &&
 			                          framebufferManager && waterRenderer->IsInScene();
 			if (waterInScene)
 				waterRenderer->RenderSunlightPass(commandBuffer);
@@ -2782,7 +2863,7 @@ namespace spades {
 				depthResolveFilter->Resolve(commandBuffer, offscreenDepth.GetPointerOrNull(),
 					framebufferManager->GetResolvedDepthImage().GetPointerOrNull());
 				// The outlines' stencil too, final as the depth is
-				if ((int)r_outlines)
+				if (OutlinesWanted())
 					depthResolveFilter->ResolveStencil(
 					  commandBuffer, offscreenDepth.GetPointerOrNull(),
 					  framebufferManager->GetResolvedStencilImage().GetPointerOrNull());
@@ -2835,7 +2916,7 @@ namespace spades {
 			// and so is the stencil the outlines read
 			if (!msaaScene) {
 				framebufferManager->CopySceneDepthForSampling(commandBuffer);
-				if ((int)r_outlines)
+				if (OutlinesWanted())
 					framebufferManager->CopySceneStencilForSampling(commandBuffer);
 			}
 
@@ -2854,7 +2935,7 @@ namespace spades {
 			// (see CopySceneForWaterSampling / ResolveMirrorColor
 			// and the GetWater*() accessors), and refraction depth reuses the scene's
 			// resolved depth.
-			bool waterEnabled = (int)settings.r_water > 0 && waterRenderer && !waterInScene;
+			bool waterEnabled = WaterWanted(1) && waterRenderer && !waterInScene;
 
 			// Copy scene to screen copy images for water refraction sampling
 			// (water renders to the same framebuffer, so it can't sample from it directly)
@@ -3419,7 +3500,7 @@ namespace spades {
 			// the scene, so every filter after this one, temporal AA first, takes
 			// them as part of it: drawn after temporal AA, the outlines would follow
 			// the jittered depth's edges from frame to frame and crawl.
-			if ((int)r_outlines && cavityOutlineFilter)
+			if (OutlinesWanted() && cavityOutlineFilter)
 				add(cavityOutlineFilter.get(), [this](VkCommandBuffer c, VulkanImage* i, VulkanImage* o) {
 					cavityOutlineFilter->Filter(c, i, o);
 					return true;
@@ -4171,9 +4252,14 @@ namespace spades {
 			// into the offscreen scene pass.
 			multisampling.rasterizationSamples = device->GetSampleCount();
 
+			// Tested against the scene's depth and writing none, as GL draws
+			// them: what stands in front of a line hides it. The model editor's
+			// ground grid and axes are debug lines, and would otherwise show
+			// through the model.
 			VkPipelineDepthStencilStateCreateInfo depthStencil{};
 			depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-			depthStencil.depthTestEnable = VK_FALSE;
+			depthStencil.depthTestEnable = VK_TRUE;
+			depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 			depthStencil.depthWriteEnable = VK_FALSE;
 			depthStencil.stencilTestEnable = VK_FALSE;
 

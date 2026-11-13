@@ -434,6 +434,31 @@ namespace spades {
 			indices.push_back(idx + 3);
 		}
 
+		void VulkanImageRenderer::AddShadedTriangle(const Vector2& p1, const Vector2& p2,
+		                                            const Vector2& p3, const Vector4& c1,
+		                                            const Vector4& c2, const Vector4& c3) {
+			const uint32_t idx = static_cast<uint32_t>(vertices.size());
+
+			const Vector2* p[3] = {&p1, &p2, &p3};
+			const Vector4* c[3] = {&c1, &c2, &c3};
+			for (int i = 0; i < 3; i++) {
+				ImageVertex v;
+				v.x = p[i]->x;
+				v.y = p[i]->y;
+				v.u = 0.0F;
+				v.v = 0.0F;
+				v.r = c[i]->x;
+				v.g = c[i]->y;
+				v.b = c[i]->z;
+				v.a = c[i]->w;
+				vertices.push_back(v);
+			}
+
+			indices.push_back(idx);
+			indices.push_back(idx + 1);
+			indices.push_back(idx + 2);
+		}
+
 		void VulkanImageRenderer::AddTriangle(float dx1, float dy1, float dx2, float dy2, float dx3,
 		                                      float dy3, float r, float g, float b, float a) {
 			ImageVertex v;
@@ -674,21 +699,27 @@ namespace spades {
 		// Bind pipeline once (all batches use the same pipeline)
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-		// The layout the client drew in: the swapchain extent on a monitor (the
-		// authoritative size there: ScreenWidth()/ScreenHeight() may be stale
-		// after a resize, or differ from the pixels on HiDPI displays), or the
-		// fixed layout of a headset panel. Vertices are in these units.
+		// The layout the client drew in, which the vertices are in: a headset
+		// panel's fixed layout, or the renderer's 2D layer, in window units on a
+		// monitor (fewer than its pixels on a high-DPI display, as GL draws it).
+		// The viewport stretches it over the surface's pixels.
 		VkExtent2D uiExtent = SurfaceExtent();
-		float invUIWidth  =  2.0f / static_cast<float>(uiExtent.width);
-		float invUIHeight = -2.0f / static_cast<float>(uiExtent.height);
+		float layoutW = static_cast<float>(uiExtent.width);
+		float layoutH = static_cast<float>(uiExtent.height);
+		if (fixedExtent.width == 0) {
+			layoutW = std::max(1.0f, renderer.ScreenWidth());
+			layoutH = std::max(1.0f, renderer.ScreenHeight());
+		}
+		float invUIWidth  =  2.0f / layoutW;
+		float invUIHeight = -2.0f / layoutH;
 
 		// The surface drawn into. The viewport stretches the layout over it, so
 		// only the scissor and the circular clip (which the fragment shader
 		// tests against gl_FragCoord) need converting to its pixels.
 		if (target.width == 0 || target.height == 0)
 			target = uiExtent;
-		const float toTargetX = static_cast<float>(target.width) / static_cast<float>(uiExtent.width);
-		const float toTargetY = static_cast<float>(target.height) / static_cast<float>(uiExtent.height);
+		const float toTargetX = static_cast<float>(target.width) / layoutW;
+		const float toTargetY = static_cast<float>(target.height) / layoutH;
 
 		VkViewport viewport{};
 		viewport.x = 0.0f;

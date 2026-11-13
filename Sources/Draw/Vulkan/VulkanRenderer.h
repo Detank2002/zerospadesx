@@ -408,6 +408,9 @@ namespace spades {
 			void BuildProjectionMatrix();
 			void BuildView();
 			void BuildFrustrum();
+			bool OutlinesWanted() const;
+			/** Whether water of at least quality `level` (`r_water`) is drawn */
+			bool WaterWanted(int level);
 
 			void EnsureInitialized();
 			void EnsureSceneStarted();
@@ -643,6 +646,8 @@ namespace spades {
 
 			void AddSprite(client::IImage&, Vector3 center, float radius, float rotation) override;
 			void AddLongSprite(client::IImage&, Vector3 p1, Vector3 p2, float radius) override;
+			void AddImagePlane(client::IImage&, Vector3 origin, Vector3 axisU,
+			                   Vector3 axisV) override;
 			void AddGlare(client::IImage&, const client::GlareParam&) override;
 
 			void AddLight(const client::DynamicLightParam& light) override;
@@ -664,6 +669,9 @@ namespace spades {
 			               const Vector2& outBottomLeft, const AABB2& inRect) override;
 
 			void DrawFilledTriangle(const Vector2& v0, const Vector2& v1, const Vector2& v2) override;
+			void DrawShadedTriangle(const Vector2& v0, const Vector2& v1, const Vector2& v2,
+			                        const Vector4& c0, const Vector4& c1,
+			                        const Vector4& c2) override;
 			void DrawFilledRectFade(float x0, float y0, float x1, float y1, Vector4 color0,
 			                        Vector4 color1, bool horizontal) override;
 
@@ -683,8 +691,8 @@ namespace spades {
 
 			float ScreenWidth() override;
 			float ScreenHeight() override;
+			float ScreenPixelRatio() override;
 			bool SetVRCanvas(int canvas) override;
-			float GetUIPixelRatio() override;
 			bool GetVRFrameStats(float& gpuMilliseconds, float& resolutionScale) override;
 			void SetVRScopeView(const Vector3& origin, const Vector3& right, const Vector3& up,
 			                    const Vector3& forward, float fov) override;
