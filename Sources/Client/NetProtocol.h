@@ -87,6 +87,7 @@ namespace spades {
 			PacketTypeDaytimeWeather = 115, // S2C, extension id 0x33 (`64 + extension id`)
 			PacketTypePlayerOutfit = 117,   // S2C, extension id 0x35 (`64 + extension id`); see PlayerOutfit.h
 			PacketTypeVRPresence = 122, // C2S2P, extension id 58; see VRNetProtocol.h
+			PacketTypeSmoke = 127, // S2C, extension id 0x3F (`64 + extension id`); see Smoke.h
 			PacketTypeCompactWorldUpdate = 126, // S2C, extension id 0x3E; see ReadCompactWorldEntry
 		};
 
@@ -101,6 +102,7 @@ namespace spades {
 			ExtensionTypePlayerOutfit = 0x35,
 			ExtensionTypeCompactWorldUpdate = 0x3E, // past ZeroSpades' range (to 0x33) by ten
 			ExtensionTypeVRPresence = 58,
+			ExtensionTypeSmoke = 0x3F,
 			ExtensionTypePlayerLimit = 192,
 			ExtensionTypeMessageTypes = 193,
 			ExtensionTypeKickReason = 194,

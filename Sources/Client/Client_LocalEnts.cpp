@@ -125,6 +125,7 @@ namespace spades {
 			damageIndicators.clear();
 			soundFeedbackIndicators.clear();
 			localEntities.clear();
+			smokes.Clear(SmokeParams::kAnonymous);
 			grenadeTracers.clear();
 
 			if (bloodMarks)
@@ -371,6 +372,19 @@ namespace spades {
 				ent->SetBlockHitAction(BlockHitAction::Ignore);
 				localEntities.emplace_back(std::move(ent));
 			}
+		}
+
+		void Client::StartSmoke(const SmokeParams& params) {
+			SPADES_MARK_FUNCTION();
+			if (!world)
+				return; // before the map: the server sends it again once it is in
+			Handle<IAudioChunk> hiss;
+			if (params.sound && !IsMuted())
+				hiss = audioDevice->RegisterSound("Sounds/Misc/Smoke.opus");
+			// Drawn whatever the particle setting: smoke can be cover, and turning
+			// the particles down must not see through it.
+			localEntities.emplace_back(stmp::make_unique<SmokeEntity>(
+			  *this, audioDevice.GetPointerOrNull(), hiss, params, smokes.Start(params.id)));
 		}
 
 		void Client::KickCamera(float strength) {

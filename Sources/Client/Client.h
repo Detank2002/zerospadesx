@@ -45,6 +45,7 @@
 #include "Player.h"
 #include "PieMenuView.h"
 #include "PlayerOutfit.h"
+#include "Smoke.h"
 #include "VRNetProtocol.h"
 #include "VRState.h"
 #include <Core/Math.h>
@@ -216,6 +217,7 @@ namespace spades {
 			// Player Models protocol extension: which model set a team or a player is
 			// drawn with. Empty when the server does not negotiate it.
 			PlayerOutfits playerOutfits;
+			SmokeRegistry smokes;
 
 			// player state
 			PlayerInput playerInput;
@@ -1196,6 +1198,11 @@ namespace spades {
 
 			/** What the Teamplay extension has made this client remember. */
 			const Teamplay& GetTeamplay() const { return *teamplay; }
+
+			/** The Smoke extension: a smoke the server puts in the world, and one
+			 * it takes away (255: all). Only drawn; nothing else follows from it. */
+			void StartSmoke(const SmokeParams& params);
+			void ClearSmoke(int id) { smokes.Clear(id); }
 
 			/** The model sets the Player Models extension has assigned. */
 			const PlayerOutfits& GetPlayerOutfits() const { return playerOutfits; }

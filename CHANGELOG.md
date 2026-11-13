@@ -9,6 +9,7 @@ one change, in a player's words.
 
 - New: zombies come in several looks, and each kind of brute has its own
 - New: zombies and brutes carry their own spade, and the Spitter its acid
+- New: smoke clouds and coloured smoke markers on servers that use them
 - New: a model editor, sharper text on high-DPI screens, and automatic screen setup
 - New: Escape on the main screen asks before quitting
 

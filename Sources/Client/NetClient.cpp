@@ -55,6 +55,7 @@
 #include <Core/Strings.h>
 #include <Core/TMPUtils.h>
 #include "ServerExtensionLog.h"
+#include "Smoke.h"
 
 DEFINE_SPADES_SETTING(cg_unicode, "1");
 
@@ -630,6 +631,7 @@ namespace spades {
 				case ExtensionTypeKickReason: return "Kick Reason";
 				case ExtensionTypeVRPresence: return "VR Presence";
 				case ExtensionTypeCompactWorldUpdate: return "Compact World Update";
+				case ExtensionTypeSmoke: return "Smoke";
 				default: return _Tr("NetClient", "Unknown (ID {0})", ToString(id));
 			}
 		}
@@ -1025,6 +1027,17 @@ namespace spades {
 			ApplyFlashlightPacket(r, *client, flashlightBeams, false);
 		}
 
+		void NetClient::HandleSmokePacket(spades::client::NetPacketReader& r) {
+			SPADES_MARK_FUNCTION();
+
+			if (!HasExtension(ExtensionTypeSmoke)) {
+				SPLog("Ignoring a Smoke packet from a server that did not negotiate "
+				      "the extension");
+				return;
+			}
+			ApplySmokePacket(r, *client);
+		}
+
 		void NetClient::HandlePlayerOutfitPacket(spades::client::NetPacketReader& r) {
 			SPADES_MARK_FUNCTION();
 
@@ -1060,6 +1073,7 @@ namespace spades {
 				case PacketTypeDamageMarker: HandleDamageMarkerPacket(r); break;
 				case PacketTypeVRPresence: HandleVRPresencePacket(r); break;
 				case PacketTypeFlashlight: HandleFlashlightPacket(r); break;
+				case PacketTypeSmoke: HandleSmokePacket(r); break;
 				case PacketTypePositionData: {
 					Player& p = GetLocalPlayer();
 					if (r.GetLength() != 13) {

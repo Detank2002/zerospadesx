@@ -983,6 +983,11 @@ namespace spades {
 				case PacketTypeFlashlight:
 					ApplyFlashlightPacket(r, *client, flashlightBeams, seekingMode);
 					break;
+				case PacketTypeSmoke:
+					// An event in time: a smoke seeked past is gone by then.
+					if (!seekingMode)
+						ApplySmokePacket(r, *client);
+					break;
 				case PacketTypePlayerOutfit:
 					// State, not an event: applied while seeking too.
 					ApplyPlayerOutfitPacket(r, client->GetPlayerOutfits());

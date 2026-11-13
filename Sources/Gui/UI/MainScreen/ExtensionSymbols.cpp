@@ -39,7 +39,8 @@ namespace spades {
 			  client::ExtensionTypeTeamplay,    client::ExtensionTypeDamageMarkers,
 			  client::ExtensionTypePlayerOutfit, client::ExtensionTypePieMenu,
 			  client::ExtensionTypeFlashlight,  client::ExtensionTypeDaytimeWeather,
-			  client::ExtensionTypeCompactWorldUpdate, client::ExtensionTypeVRPresence,
+			  client::ExtensionTypeCompactWorldUpdate, client::ExtensionTypeSmoke,
+			  client::ExtensionTypeVRPresence,
 			  client::ExtensionTypePlayerLimit};
 
 			bool IsPlumbing(std::uint8_t id) {
@@ -157,6 +158,14 @@ namespace spades {
 					p.Arc(cx + h, cy, inner, a, 2.0F * kPi - a);
 					break;
 				}
+				case client::ExtensionTypeSmoke:
+					// A cloud: three puffs on a flat base
+					p.Arc(0.3F, 0.62F, 0.22F, kPi * 0.5F, kPi * 1.5F);
+					p.Arc(0.52F, 0.42F, 0.26F, kPi, kPi * 2.0F);
+					p.Arc(0.76F, 0.6F, 0.2F, kPi * 1.5F, kPi * 2.5F);
+					p.Line(0.3F, 0.84F, 0.76F, 0.84F);
+					p.Line(0.26F, 0.42F, 0.26F, 0.42F);
+					break;
 				case client::ExtensionTypeCompactWorldUpdate:
 					// A lightning bolt: the world's news, faster
 					p.Line(0.62F, 0.0F, 0.22F, 0.55F);
